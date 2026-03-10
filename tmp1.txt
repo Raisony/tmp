@@ -1,0 +1,133 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass[12pt]{report}
+\usepackage[subpreambles=true]{standalone}
+\usepackage{import}
+\usepackage{graphicx}
+\usepackage{villanova}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{subcaption}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage{rotating} %\sidways for vertical table elements
+
+\usepackage{xcolor}
+
+\usepackage[backend=biber]{biblatex}
+\addbibresource{main.bib}
+
+\usepackage{hyperref}
+\usepackage[capitalize]{cleveref}
+\crefname{section}{Sec.}{Secs.}
+\Crefname{section}{Section}{Sections}
+\Crefname{table}{Table}{Tables}
+\crefname{table}{Tab.}{Tabs.}
+\crefname{definition}{Def.}{Defs.}
+
+\usepackage{listings}
+\usepackage{multicol}
+% Define code listing settings
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+\lstdefinestyle{mystyle}{
+    language=Python,
+    backgroundcolor=\color{backcolour},
+    basicstyle=\ttfamily,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!40!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\color{gray},
+    numbersep=5pt,
+    breaklines=true,
+    postbreak=\mbox{\textcolor{red}{$\hookrightarrow$}\space},
+    columns=fullflexible,
+    showstringspaces=false,
+}
+\lstset{style=mystyle}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\title{\textbf{Towards Robust and Efficient Machine Learning Systems Against Uncertainty}} 
+\author{Dongning Ma}
+
+\gradgroup{College of Engineering}
+\date{September 2024}
+\supervisor{Xun Jiao}
+\supervisortitle{Associate Professor, Villanova University}
+
+% \gradchair{Graduate Group Chairperson's Typed Name, Full Faculty Title}
+\committee{Jiafeng Xie, Associate Professor, Villanova University}
+\committee{Kyle Juretus, Assistant Professor, Villanova University}
+\committee{Han Wang, Assistant Professor, Temple University} % If applicable, comment out or duplicate this line to remove or add a committee member
+%-------------------------------------------
+
+%%%% OPTIONAL COPYRIGHT NOTICE
+\authorlegal{Dongning Ma} % To opt out of copyrighting your dissertation, uncomment this line. If you do, you will also need to comment \makecopyright 
+%-------------------------------------------
+%\cclicense{Name of Selected Creative Commons License} % If applicable, uncomment this line and edit the text between the {}. If you do, you will also need to edit other related lines.
+%-------------------------------------------
+%\cclicenseurl{URL of selected Creative Commons License} % If applicable, uncomment this line and edit the text between the {}. If you do, you will also need to edit other related lines.
+%-------------------------------------------
+
+%%%% OPTIONAL DEDICATION
+% \dedication{Write your dedication text in italics here.} % If not applicable, comment out this line to hide the optional dedication page. If you do, you will also need to edit other related lines.
+%-------------------------------------------
+
+%%%% OPTIONAL ACKNOWLEDGEMENT
+% \acknowledgement{\input{chapters/acknowledgement}} 
+%-------------------------------------------
+
+%%%% ABSTRACT
+\abstract{\import{chapters/}{abstract}} % Write your abstract between the {}
+%-------------------------------------------
+
+%%%% OPTIONAL PREFACE
+%\preface{Write your preface text here.} % If applicable, uncomment this line and write your preface between the {}. If you do, you will also need to edit line 101.
+%-------------------------------------------
+
+\begin{document}
+\maketitle 
+
+\setcounter{page}{2}
+
+%%%% OPTIONAL COPYRIGHT NOTICE
+\makecopyright % If not applicable, comment out this line to hide the optional traditional copyright notice page. If you do, you will also need to edit line 47.
+%-------------------------------------------
+%\makecreativecommons % If applicable, uncomment this line to insert the optional Creative Commons License copyright notice page. If you do, you will also need to edit lines 49, 51, and 76.
+%-------------------------------------------
+
+\makecommitteepage
+
+\tableofcontents
+
+%%%% OPTIONAL LIST OF TABLES
+\clearpage \phantomsection \addcontentsline{toc}{chapter}{LIST OF TABLES} \begin{singlespacing} \listoftables \end{singlespacing}% If not applicable, comment out this line to hide the optional List of Tables
+%-------------------------------------------
+
+%%%% OPTIONAL LIST OF ILLUSTRATIONS
+\clearpage \phantomsection \addcontentsline{toc}{chapter}{LIST OF ILLUSTRATIONS} \begin{singlespacing} \listoffigures \end{singlespacing}% If not applicable, comment out this line to hide the optional List of Illustrations
+%-------------------------------------------
+
+%%%% OPTIONAL ACKNOWLEDGEMENT PAGE
+% \makededication
+% \makeacknowledgement 
+%-------------------------------------------
+
+\makeabstract
+
+
+%%%% OPTIONAL PREFACE
+%\makepreface % If applicable, uncomment this line to insert the optional preface. If you do, you will also need to edit line 67.
+%-------------------------------------------
+%-------------------------------------------
+\begin{mainf}
+\import{chapters/}{c1intro}
+\import{chapters/}{c2modeling}
+\import{chapters/}{c3exposure}
+\import{chapters/}{c4optimization}
+\import{chapters/}{c5con}
+\printbibliography
+\end{mainf}
+
+\end{document}
+

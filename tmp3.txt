@@ -1,0 +1,1145 @@
+\documentclass[class=report, crop=false]{standalone}
+\usepackage{algorithm}
+
+\usepackage{algpseudocode}
+
+\newcommand{\PyTEI}{\textbf{PyTEI}}
+\newcommand{\WoAxC}{\textbf{WoAxC}}
+\newcommand{\llmei}{\textit{llmei}}
+
+
+\begin{document}
+
+\chapter{Cross-layer Exposure of Uncertainty to Machine Learning Systems}
+\label{sec:c3exposure}
+
+\section{Background and Motivation}
+Many modern machine learning applications are delivered as machine learning as a service (MLaaS) where users and service providers interact through a cloud-based platform~\cite{ribeiro2015mlaas}. Specifically, users can access a range of tools and services to create and deploy machine learning applications without needing to manage the underlying infrastructure, while service providers are responsible for maintaining and general housekeeping, ensuring the availability and scalability of the service, and often providing pre-built models, algorithms, and tools for data processing, model training, and deployment~\cite{ribeiro2015mlaas}. 
+
+To support cohesive end-to-end service provision, providers should ensure the robustness of infrastructure and contain the uncertainty within the full pipeline from lower-level hardware to higher-level applications. Although different metricshave been proposed to quantitatively present the modality and scale of uncertainty, many of the existing work parochially model errors in close proximity to the occurrence and does not capture their broader impact at the application level.
+
+Specifically, we have observed two crucial facts that urge us to expose robustness evaluation to the level of machine learning models and applications:
+
+\textbf{Observation 1:} The broader impact on robustness from different manifestations of uncertainty can vary.
+
+We observe that bit flips that manifest in different bit positions within a number can result into drastically different outcomes. The IEEE-754 floating point number format is a widely adopted standard for representing real numbers in computing systems, which defines formats that are commonly used in machine learning systems such as singe-precision (32-bit) and half-precision (16-bit) floating point numbers. Using 32-bit floating point number as an example, the value of it is determined by 3 fields of bits: the sign bit, the 8-bit exponent field and the 23-bit mantissa field.
+
+Bit errors in critical positions within a number, such as the exponent field, can cause extreme deviations. For example, flipping the second bit of the number $0.625$ can result in $2.13 \times 10^{38}$. Such errors can propagate through a network, potentially exceeding the range of floating-point numbers and becoming invalid, such as \textit{inf} or \textit{nan}. If parameters or intermediate activations in a machine learning model encounter this uncertainty, the system may face significant disruptions, including invalid predictions during inference and gradient explosions during training. In contrast, bit flips in less significant positions, such as the mantissa field, may not be immediately noticeable. Their impact can be subtle, causing deviations that accumulate over time. While these errors may not immediately corrupt parameters, they still pose a threat to the underlying system.
+
+
+\textbf{Observation 2:} Different machine learning models or architectures can exhibit different levels of robustness against uncertainty.
+
+Another insightful observation is that different models or architectural components may possess different levels of resilience against uncertainty. One typical example is the deep recommender systems (DRS) which are designed to predict user preferences and provide personalized online recommendations~\cite{guo2017deepfm, naumov2019deep}. DRS is responsible of handling inputs with features from different modalities, thus it usually embraces two different components that share radically different architectures: the multiplayer perceptrons (MLP), and the embedding tables. Embedding tables are used to convert categorical, or sparse data (such as user IDs, item IDs, genres, etc.) into dense, continuous vector representations, while MLPs are used to process continuous, or dense data as well as capture complex, non-linear relationships between the features derived from the embedding tables and any additional numerical or categorical features~\cite{naumov2019deep, desai2022random}. When respectively injecting errors under the same error rate to the parameters in MLP and embedding components in a DRS model, the impact on the model outputs heavily vary. As shown in \cref{fig:c1_dfm_example} where we inject bit flips, embedding tables (EMB) can tolerate bit error rate up to $10^{-3}$ without much performance loss while MLP has already experienced notable loss even under the bit error rate of $10^{-5}$. 
+
+\begin{figure}[htbp]
+\centering
+    \begin{subfigure}[b]{0.75\columnwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{./figures/c1intro/dfm_example.pdf}
+    \end{subfigure}
+    \caption{Injecting bit flip errors by different error rates to the MLP and embedding (EMB) components in a deep recommender system.}
+    \label{fig:c1_dfm_example}
+\end{figure}
+
+Therefore, based on the two observations above, we show the importance of exposing error modeling across different layers from hardware architectures to software and learning algorithms in the machine learning system to study the long-term and broader impact of uncertainty on robustness.
+
+
+\textbf{Our Solution}
+
+In the previous chapter, we use learning-based and context-aware error model to enable fast and accurate characterization of uncertainty in machine learning systems. Thanks to the error modeling effort, we are able to expose uncertainty across different layers in a machine learning system. Specifically, we first develop a flexible fault injection tool \PyTEI, to enable cross-layer error injection where we systematically explore the robustness of deep recommender systems. Later in this chapter, we also introduce \WoAxC ~and discuss how to optimize the configuration of approximate computing for an application using heuristic based methods such as genetic algorithm. At the end of this chapter, we highlight the potential future work to expand the scope of and generalize our proposed fault injection compaign to other models and the entire lifecycle of machine learning development to make the framework more universal.
+
+\section{Cross-layer Fault Injection to Deep Recommender Systems}
+
+Deep learning algorithms are introduced into recommendation systems with the objective of providing high quality and accurate personalized contents. A typical task is the click-through-rate (CTR) prediction, where a DRS is developed to estimate the probability of a user's interaction (click, bookmark, purchase, etc.) with a specific item in a given context~\cite{wang2017deep}. Diverse range of DRS have been proposed and implemented. For example, Wide \& Deep (WD) from Google considers the joint advantage of neural networks and factorization models (FM) for enhanced performance~\cite{cheng2016wide}. Further, DeepFM (DFM) enables the learning of both high- and low-order feature interactions as well as a sharing strategy of feature embedding which shows increased performance and efficiency~\cite{guo2017deepfm}. Other experimental and/or commercial architectures such as attentional FM (AFM)~\cite{xiao2017attentional} and deep cross networks (DCN)~\cite{wang2017deep} have also been introduced for higher performance and efficiency. 
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = .9\columnwidth]{figures/c3exposure/pytei/recsys_overview.pdf}
+    \caption{An example DRS model for purchase prediction.}
+    \label{fig:c3_pytei_drs_overview}
+\end{figure}
+
+Without loss of generality, in \cref{fig:c3_pytei_drs_overview} we present a typical model of DRS that is trying to predict the purchase probability of an item during a user visit. The input to the DRS model consists of multi-modal features related to the user and the item, where the features can be mainly considered into two groups: the dense features such as the time of day of the visit, and sparse features such as pairing information between users and items. Typically, the dense features are passed to MLPs for feature extraction. The sparse categorical features on the other hand, are handled by embedding tables and converted into latent embeddings. After the sparse/dense interaction, the features are then used to predict the probability of user purchase on the item via another MLP. Such probability can be used on a set of items to select relevant candidates to be recommended to the user.
+
+Processing the dense features using neural networks and processing the sparse features with embedding tables have exhibited drastically different workload characteristics during run-time: the neural networks inside an DRS (rendered by MLPs or attentional layers with matrix operations) are usually compute-intensive, while the embedding processes (rendered by indexing embedding tables) are usually memory-intensive~\cite{hsia2020cross}.
+
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/terrorch_recsys.pdf}
+    \caption{Overview of injecting bit errors in DRS models in PyTorch using \PyTEI.}
+    \label{fig:c3_pytei_injection_overview}
+\end{figure}
+
+\subsection{Methodology}
+\label{sec:c3_pytei_method}
+
+\subsubsection{Error Model}
+In this work, we employ the random bit flip error model for its wide acknowledgement to describe hardware errors (e.g., SDCs)~\cite{sullivan2021characterizing, sangchoolie2017one, li2022efficient}. In this model, each bit position can flip based on a probability referred to as bit error rate (BER). The bit flip errors are also statistically independent from each other. Although there are other error models such as permanent errors where the erroneous positions are stuck at a fault value~\cite{sridharan2012study}, we note that they are not the focus of this work and can be studied as a follow-up work.  
+
+\subsubsection{Error Injection Framework: \PyTEI}
+To enable systematic analysis on DRS robustness, we need efficient error injection and mitigation framework to enable an extensive error injection campaign with reasonable amount of time. We have searched through the available open-sourced error injection frameworks including PyTorchFI~\cite{mahmoud2020pytorchfi}, Ares~\cite{reagen2018ares}, BinFI~\cite{chen2019binfi}, GoldenEye~\cite{mahmoud2022goldeneye} and FIdelity~\cite{he2020fidelity}. Nevertheless, these frameworks share certain limitations that render them unsuitable for use in this specific case study. The most challenging obstacle is the efficiency. For example, as floating point tensors in PyTorch do not naturally support bit-level operations (such as bit-wise XOR), these frameworks typically leverage additional packages such as \textit{struct} or \textit{bitstring} for error injection. These packages require frequent conversions between torch tensors and other types of data containers with back-and-forth movements between devices. This accounts for most of the time spent on error injection based on our evaluation, particularly under larger model and higher BERs. Another issue is the tedious setup for environment to use those frameworks. Most of the available frameworks rely on specific environments and/or dockers with numerous additional packages. Some even require users to compile or build CUDA codes by themselves. Moreover, many of them do not provide error mitigation methods or lack of flexible options for hooking in customized error mitigation. As a summary, we need a framework that has the following critical requirements specifically:
+\begin{itemize}
+    \item The framework should be able to perform bit-level flips on parameters of PyTorch models to inject emulated hardware errors based on a pre-defined BER. The framework should also provide interface to implement error mitigation methods accordingly.
+    \item The framework should be easily generalized for models with different architectures or components, convenient to setup and require minimal dependency beyond PyTorch.
+    \item The emulation of error injection and mitigation should be considerably fast so that large numbers of different designs can be evaluated efficiently.
+\end{itemize}
+
+To realize such requirements, we develop a framework \PyTEI, which is an user-friendly, efficient and flexible hardware error injection framework using no other dependencies besides PyTorch. It has the following key features and contributions which essentially enable us to evaluate DRS robustness at large scale efficiently:
+\begin{itemize}
+    \item \textbf{User-friendly.} \PyTEI ~does not strictly require any other dependency other than PyTorch. Note that user may use other packages such as \textit{timeit} and \textit{tqdm} for auxiliary purposes such as tracking the progress and time. Additionally, \PyTEI ~also does not require users to compile, build such as other frameworks, nor even use custom environments.
+    \item \textbf{Efficient.} \PyTEI ~uses PyTorch built-in data type cast (\textit{torch.view()}) in bit flip operations, which significantly (about 100X) accelerates the error injection effort. \PyTEI ~can inject bit flip errors at an considerably high BER ($10^{-3}$) to a model with about 19M parameters within a few seconds using even just a commodity CPU. This also enables \PyTEI ~on any PyTorch model as long as they are implemented as \textit{torch.nn.Module} with named parameters.
+    \item \textbf{Flexible.} \PyTEI ~provides flexible interfaces for customization on both error model and mitigation. \PyTEI ~allows user to define their customized error model such as random value error beyond the provided bit flip error. \PyTEI ~also implements two mitigation methods for emulation: activation clipping and SBP (introduced in \cref{sec:c3_pytei_method_em}) and allows user to customize the mitigation methods.
+\end{itemize}
+
+In \cref{fig:c3_pytei_injection_overview}, we show a more detailed, step-by-step injection of hardware errors into DRS models using \PyTEI. Before injection, we use a set of test data to obtain golden outputs (from error-free models) and/or performance scores (e.g. AUC-ROC). In the meanwhile, the user can provide information such as the BER (e.g., 1e-7), the target (e.g., MLP) and parameters (e.g., weights) for error injection. Based on the BER, injection target and model architecture, we generate an error map to indicate what parameters and which bit positions of the parameter to have error. The model and the error map are then iterated together to update the model parameters. With the model after injection, we use the same test data again to observe outputs which is compared with the golden outputs and/or labels to obtain the output deviation and/or the test score degradation. 
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 0.8\columnwidth]{figures/c3exposure/pytei/pytei_framework.pdf}
+    \caption{Top-down view of the \PyTEI ~stack.}
+    \label{fig:c3_pytei_pytei_framework}
+\end{figure}
+
+
+A top-down view of how \PyTEI ~interacts with DRS model and performs error injection and mitigation is illustrated in \cref{{fig:c3_pytei_pytei_framework}}. \PyTEI ~features a profiling functionality that works on the PyTorch implementation of a DRS model by nested iteration. Specifically, \PyTEI ~traverses through the model to obtain information of layer modules such as layer type, and then traverses each layer module to obtain parameter attributes such as shapes and data types. Those profiled information of model and model parameters will be used to control error injection under the user specifications such as the error rate and target parameters or layers. The injection functionality of \PyTEI ~to emulate hardware errors, i.e., bit-flips on the memory emulation of model parameters (type-cast tensors).  Again, as \PyTEI ~operates on PyTorch built-in tensor APIs rather than third-party semantics, \PyTEI ~can enable (near) real-time error injection.
+
+In \cref{fig:c3_pytei_code} we present an example of the error map generation in \PyTEI. The error map is generated based on the parameter shape, the bit-width of the data type (which is 32-bit single precision float in this example), as well as a probability representing the error rate. Each value in the error map is a 32-bit integer where the bit positions indicates whether there will be a flip or not for the corresponding bit. The error map along with the number of injected errors are returned.
+
+
+
+\begin{figure}[htbp]
+
+\begin{lstlisting}
+    @classmethod
+    def _error_map_generate(cls, injectee_shape: tuple, dtype_bitwidth: int, device: torch.device, p: float) -> torch.Tensor:
+        error_map = (2 * torch.ones((*injectee_shape, dtype_bitwidth), dtype=torch.int, device=device)) ** torch.arange(0, dtype_bitwidth, dtype=torch.int, device=device).flip(dims=(-1, )).expand((*injectee_shape, dtype_bitwidth))
+        filter = (p * nn.functional.dropout(torch.ones_like(error_map, dtype=torch.float, device=device), 1 - p)).int()
+        error_count = filter.sum(dim=-1)
+        error_map = (filter * error_map).sum(dim=-1).int()
+        return error_map, error_count
+\end{lstlisting}
+\caption{Example of Error Map Generation in \PyTEI.}
+\label{fig:c3_pytei_code}
+\end{figure}
+
+\subsection{Evaluation Approach}
+\label{sec:c3_pytei_eval}
+\subsubsection{Evaluation of DRS Robustness}
+\label{sec:c3_pytei_exp_method}
+
+An overview of experiments in this work to evaluate the robustness of DRS against hardware error is shown in \cref{fig:c3_pytei_experiment_design}. It features a two-stage evaluation using dummy and realistic models respectively with the error injection framework \PyTEI. The first stage is to inject errors into dummy models, where the objective is to explore a broad design space to provide insights such as identifying the impact of model hyper-parameters and analyzing which of the components inside a DRS are less robust against hardware errors. The second stage is to inject errors into realistic models with the guidance from the observations using the dummy model. The realistic models are trained and tested with realistic datasets as well. Three error mitigation methods are also discussed and/or evaluated for their effectiveness.
+
+For dummy models, we first provide hyper-parameters such as the depth of MLP layers, the size of MLP hidden layer and the size of the latent embedding to configure the model. The model parameters are initialized uniformly~\cite{he2015delving} and \textbf{are not further trained}. The motivation of using dummy models without training is to reduce the effort of model training, which usually takes unrealistic amount of GPU hours (even just by fine-tuning). Additionally, further experiments using realistic models (which are trained) and data align with the observation using the dummy model as discussed in \cref{sec:c3_pytei_exp_real}. Therefore we think it is not plausible or necessary to explicitly train each of the model on the entire huge design space. The dummy model is then injected with error to obtain the error-injected model. Random synthetic data are input to both the models and the RMSE score is calculated based on the outputs of the two models to describe the output deviation after error injection which is used to evaluate the hardware error robustness. The detailed results on dummy models are presented in \cref{sec:c3_pytei_exp_dummy}.
+
+For realistic models, the architecture is implemented based on corresponding literature. Realistic datasets are used to train and test the model to obtain the baseline scores. After error injection, the same test data are input to the error-injected realistic model to obtain the scores after error injection. The score differences are used to evaluate the DRS robustness. The detailed results on dummy models are presented in \cref{sec:c3_pytei_exp_real}. The components inside realistic models can be slightly different from that of dummy models due to architectural differences. For example, the attentional mechanisms inside AFM are also considered as MLP due to their similar implementation using fully connected layers and the major computations inside them are also matrix multiplications.
+
+\subsubsection{Evaluation of Error Mitigation}
+\label{sec:c3_pytei_method_em}
+
+In this work, we also present preliminary studies on some error mitigation schemes that are in general implemented for other deep learning models: ABFT~\cite{li2022efficient}, output clipping~\cite{hoang2020ft} and selective bit protection~\cite{chen2018dec}. Analysis and results of evaluation on error mitigation is presented at \cref{sec:c3_pytei_exp_em}.
+
+\textbf{ABFT.} ABFT has recently been introduced to DRS for soft error detection~\cite{li2022efficient}. For the general matrix multiply (GEMM) operations like $\mathbf{C} = \mathbf{A} \times \mathbf{B}$, an extra column $\mathbf{S_B}$ is appended to $\mathbf{B}$ of which each element is the corresponding row-sum, i.e., $\mathbf{S_B}[i] = \sum_{j = 0}^{n - 1}\mathbf{B}[i][j]$. Therefore, with the appended column, we can obtain the equality check vector $\mathbf{A}\mathbf{S_B}$ of which each element \textbf{should be} the corresponding row-sum of $\mathbf{C}$. Therefore, if such equality is not hold, an error is detected. The result of this GEMM operation will be discarded and the operation is also repeated. For embedding operations, an additional column $\mathbf{C_T}$ is similarly added alongside embedding table $\mathbf{T}$ of which each element is the corresponding row-sum as well. Assume indices $\mathbf{F}$ are hit during an embedding operation, then the output embedding should be $\mathbf{R} =  \sum_{f \in F} \mathbf{T}[f]$. The same indices are also used to index the elements in the additional column to obtain the equality check value $r = \sum_{f \in F} \mathbf{C_T}[f]$ and the value $r$ \textbf{should be} equal to the sum of $\mathbf{R}$. Similarly, if such equality is not hold, an error is detected.
+
+\textbf{Activation Clipping.} Clipping the network activations has been investigated to improve the fault tolerance~\cite{hoang2020ft}, or enable ultra-low precision designs~\cite{choi2018pact}. For example, the ReLU activation function in the model is revised by \cref{eq:c3_pytei_lo_clamp}~\cite{choi2018pact} where activation will be confined within a range specified by a pre-defined threshold $T$.
+
+\begin{equation}
+  f(x) = 
+  \begin{cases}
+    0 & \text{if } x < 0\\
+    x & \text{if } 0 \leq x \leq T \\
+    T & \text{if } x > T \\
+  \end{cases}
+  \label{eq:c3_pytei_lo_clamp}
+\end{equation}
+
+\textbf{Selective Bit Protection.} Preliminary studies have illustrated that certain bit positions in specific data types may have dominating effect on the error behavior~\cite{chen2018dec}. For example, in IEEE-754 floating point data format, the value of a 32-bit float number is determined by 3 fields of bits: the sign-bit, the 8-bit exponent filed and the 23-bit mantissa field. The most significant bits in the exponent field are observed to have the most critical contribution of the value and is prioritized to have protection from bit errors~\cite{chen2018dec} when it is impossible to protect all the bit positions due to resource limitations. In \cref{sec:c3_pytei_exp_em}, we provide analytical and/or experimental results on those error mitigation schemes and compare their effectiveness and efficiency. 
+
+In summary, we aim to explore and answer the following research questions in this case study:
+\begin{itemize}
+    \item \textbf{RQ1}: How will DRS models generally be impacted by hardware errors? What components inside a DRS model are more vulnerable, or vice versa?
+    \item \textbf{RQ2}: How will hyper-parameters such as the hidden layer size of MLPs and the embedding dimensions affect the robustness against hardware errors?
+    \item \textbf{RQ3}: Will error mitigation methods for other deep learning models such as ABFT, activation clipping and SBP still be effective for DRS models? 
+\end{itemize}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/experiment_design.pdf}
+    \caption{The methodology of experiments: A two-stage robustness evaluation using the dummy model and the realistic models respectively. Each stage features error injection using \PyTEI. Three error mitigation methods are also discussed and/or evaluated in the stage of realistic models.}
+    \label{fig:c3_pytei_experiment_design}
+\end{figure}
+
+\subsection{Experiments: Dummy Models}
+\label{sec:c3_pytei_exp_dummy}
+\subsubsection{Dummy Models and Data Generation}
+For simplicity, we build a dummy DRS model with minimal configuration. The inputs to the model are straightforwardly synthesized, each of which has two vectors representing the dense and sparse features, respectively. To ensure simplicity, the dense features are floating point numbers generated with standard Gaussian distribution, and the sparse features are binary and in Bernoulli given a probability (sparsity). The models consists of a MLP handling the dense features, an embedding table to handle the sparse features and another MLP as the predictor, as shown in \cref{fig:c3_pytei_experiment_design}. The hyper-parameters of the dummy model and the parameters for generating the dataset which establish the design space to explore according to \cref{tab:c3_pytei_dummy_dse}. Specifically, we explore the impact of the depth and hidden layer size of the MLP model, the dimension of embedding for models and the input sparsity and sweep the BER from $10^{-9}$ to $10^{-2}$. We show below that such dummy models with synthetic data have already shown remarkable effectiveness in identifying DRS robustness vulnerability.
+
+\begin{table}[htbp]
+\caption{Hyper-parameters of the dummy model, the parameters for generating the input and the evaluated BERs.}
+\label{tab:c3_pytei_dummy_dse}%
+\begin{center}
+\begin{small}
+\begin{sc}
+    \begin{tabular}{ccc}
+    \hline
+    \multirow{3}{*}{model} & MLP depth & 1, 2 \\
+         & MLP hidden layer size & 64, 128, 256, 512 \\
+         & embedding dimension & 64, 128, 256, 512 \\
+    \hline
+    \multirow{3}{*}{input} & dense dimension & 128 \\
+          & sparse dimension & 8192 \\
+         & sparsity & 0.001, 0.01 \\
+    \hline
+    \multicolumn{2}{c}{bit error rate} & $10^{-9}$ to $10^{-2}$ \\
+    \hline
+    \end{tabular}%
+\end{sc}
+\end{small}
+\end{center}
+\end{table}
+
+
+\subsubsection{Robustness Analysis of Dummy Models}
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/heatmaps_layer0.pdf}
+    \caption{Root mean square error (RMSE) between outputs of error-free models and outputs from error-injected models under different \textbf{BERs}, \textbf{MLP hidden layer size} and \textbf{embedding dimensions}. Errors are injected into different components inside the model as outlined by the title of each row.}
+    \label{fig:c3_pytei_heatmaps_0}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/heatmaps_layer1.pdf}
+    \caption{Root mean square error (RMSE) between outputs of error-free models and outputs from error-injected models under different \textbf{BERs}, \textbf{MLP hidden layer size} and \textbf{embedding dimensions} \textit{when the number of hidden layers inside MLP is increased from 1 to 2}. Errors are injected into different components inside the model as outlined by the title of each row.}
+    \label{fig:c3_pytei_heatmaps_1}
+\end{figure}
+
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/heatmaps_layer1_dense1e-2.pdf}
+    \caption{Root mean square error (RMSE) between outputs of error-free models and outputs from error-injected models under different \textbf{BERs}, \textbf{MLP hidden layer size} and \textbf{embedding dimensions} \textit{when the number of hidden layers inside MLP is increased from 1 to 2 and the input sparsity is increased by 10X to 0.01}. Errors are injected into different components inside the model as outlined by the title of each row.}
+    \label{fig:c3_pytei_heatmaps_1s}
+\end{figure}
+
+As briefly described in \cref{sec:c3_pytei_exp_method} and \cref{fig:c3_pytei_experiment_design}, for dummy models, we use the RMSE between the outputs from error-free and error-injected models to evaluate the deviation and then characterize the impact of hardware errors. In \cref{fig:c3_pytei_heatmaps_0}, \cref{fig:c3_pytei_heatmaps_1}, and \cref{fig:c3_pytei_heatmaps_1s}, we show the RMSE metrics of the all the design points explored. We omit the RMSEs for BERs below $10^{-8}$ and above $10^{-6}$ because they are either in all zeros or all \textit{inf} or \textit{nan} numbers. According to our observation, there are possibilities that the bit errors happen on critical positions within a number such as the exponent field in the IEEE-754 32-bit floating point number and result in extremely large deviations (e.g., flipping the 2nd bit of the number $0.625$ will get $2.13 \times 10^{38}$) which, after network propagation, can exceed the range of floats and become \textit{inf} or \textit{nan}. Therefore, if there are more than 1 such invalid numbers of the output, we mark the RMSE as \textit{inf} or \textit{nan} accordingly in the figure. On the other hand, we mark any RMSE less than 0.005 as 0.0 for presenting in the figure, indicating there is no noticeable errors observed. For example, the 0.0 at the upper left slot of the row ``Entire Model'' indicates that when both the \textbf{MLP hidden size} and the \textbf{embedding dimension} are 64, injecting errors to the weights on the \textbf{entire model} does not induce in any noticeable error on the output. 
+
+We can make several observations from the figure. Overall for the figures from \cref{fig:c3_pytei_heatmaps_0} to \cref{fig:c3_pytei_heatmaps_1s}, when the BER increases the RMSE metric will also increase accordingly. This is intuitive and aligns with the observations of other machine learning models in general, since more errors injected into the model will likely translate into higher output deviations. However, we do observe that tuning the hyper-parameters of different components inside a DRS can uncover the different characteristics of robustness. For example, although by increasing the MLP hidden size (from top to down in each sub-figure) and the embedding dimension (from left to right in each sub-figure) can both lead to increasing error, MLP hidden size seems to induce more impact by having higher RMSE, or more invalid numbers. 
+
+Based on the results we infer that such difference between MLP and embedding originates from their corresponding architecture. For MLP, even with drop-out schemes, each weight as a parameter will more or less contribute when calculating prediction results with the forward pass. Therefore, when increasing the hidden layer size of MLP, the outputs also become more influenced. However, as to embedding, for each sample only a limited number of entries in the embedding table are indexed due to the sparsity of inputs, therefore it is of a high chance that the indexed entries are not affected by the error. Thus, increasing the embedding dimension does not exacerbate the output error as significant as MLP.
+
+\textbf{Impact of MLP depth.} In \cref{fig:c3_pytei_heatmaps_1}, we show the results when increasing the depth of the MLPs in the DRS model by adding another hidden layer. It can be observed that the added hidden layer deteriorates the output quality regardless of whether the error injection is into MLP, embedding or the entire model. According to our analysis, the reason behind of the increasing error is two-fold: first, an additional hidden layer in MLP indicates more parameters in general. Thus, with the same BER the absolute number of bit errors is also higher. Second, if the bit error in the first hidden layer result in an erroneous value, it can be propagated to the second layer and cause more erroneous values due to the fully connection. 
+
+\textbf{Impact of input sparsity.} In \cref{fig:c3_pytei_heatmaps_1s}, we further change the sparsity of the sparse vectors in the input set by $10X$ from 0.001 to 0.01. By comparing the last row ``Embedding'' in \cref{fig:c3_pytei_heatmaps_1s} and \cref{fig:c3_pytei_heatmaps_1}, we can observe that since more entries are indexed within the embedding table, more errors are incorporated in the latent embeddings. Then the impact from error-injected embedding table will subsequently become more pronounced, which is presented by having higher RMSE and/or more invalid numbers. 
+
+As a summary, we can have the following insights: First, similar to other machine learning models, DRS model suffers a similar trend that when the BER increases, the output quality will degrade in general. However, the hyper-parameters of different components inside a DRS can pose different impact on the robustness. This is resulted from the inherent architectural differences of those components. When the BER increases to around $10^{-6}$, nearly all the results witness invalid values in their outputs. Therefore, we can infer that for the experiments on realistic model and data, the model performance will experience noticeable degradation for BERs above $10^{-6}$.
+
+\subsection{Experiments: Realistic Models}
+\label{sec:c3_pytei_exp_real}
+
+\subsubsection{Realistic Models and Datasets}
+We target at 5 widely acknowledged recommendation systems: Factorization Machine (FM)~\cite{rendle2010factorization}, Deep Factorization Machine (DFM)~\cite{guo2017deepfm}, Attentional Factorization Machine (AFM)~\cite{xiao2017attentional}, Deep Cross Network (DCN)~\cite{wang2017deep}, and Wide and Deep (WD)~\cite{cheng2016wide}. The models are implemented from \textit{torchfm} The details about the evaluated models are listed in \cref{tab:c3_pytei_models}. As it is very difficult to find pre-trained PyTorch models for those DRS models since different models use different frameworks for implementations and datasets for training, we train all the models afresh using the default parameters in \textit{torchfm}. 
+
+\begin{table}[htbp]
+\caption{Models, Datasets and Baseline Scores}
+\label{tab:c3_pytei_models}%
+\begin{center}
+\begin{small}
+\begin{sc}
+    \begin{tabular}{cccc}
+    \toprule
+    \textbf{Model} & \textbf{Dataset} & \textbf{\#Param.} & \textbf{AUC-ROC} \\
+    \midrule
+    \multirow{3}[2]{*}{fm} & MovieLens-1M & 171K  & 0.813 \\
+          & MovieLens-20M & 4.59M & 0.838 \\
+          & Criteo & 18.5M & 0.779 \\
+    \midrule
+    \multirow{3}[2]{*}{dfm} & MovieLens-1M & 170K  & 0.842 \\
+          & MovieLens-20M & 4.59M & 0.838 \\
+          & Criteo & 18.5M & 0.785 \\
+    \midrule
+    \multirow{3}[2]{*}{afm} & MovieLens-1M & 170K  & 0.862 \\
+          & MovieLens-20M & 4.58M & 0.827 \\
+          & Criteo & 18.5M & 0.801 \\
+    \midrule
+    \multirow{3}[2]{*}{dcn} & MovieLens-1M & 161K  & 0.824 \\
+          & MovieLens-20M & 4.32M & 0.818 \\
+          & Criteo & 17.4M & 0.799 \\
+    \midrule
+    \multirow{3}[2]{*}{wd} & MovieLens-1M & 170K  & 0.828 \\
+          & MovieLens-20M & 4.59M & 0.815 \\
+          & Criteo & 18.5M & 0.791 \\
+    \bottomrule
+    \end{tabular}%
+\end{sc}
+\end{small}
+\end{center}
+\end{table}
+
+We use 3 benchmark datasets for CTR prediction: Movielens-1M, Movielens-20M and Criteo DAC dataset. The Movielens-1M dataset contains 1 million ratings from 6,000 users on 4,000 movies and the Movielens-20M dataset contains 20 million ratings and 465,000 tag applications applied to 27,000 movies by 138,000 users. The Criteo dataset contains the click records of 45 million users with 13 continuous and 26 categorical features. The datasets are randomly split by 8:1:1 for training, validation and testing. 
+
+We use AUC-ROC as our main quality metric for consistency on comparison since it is used mostly across the papers of the DRS models. The baseline AUC-ROCs reported in \cref{tab:c3_pytei_models} mostly align with what the original research papers present with minor differences. 
+
+\subsubsection{Robustness Analysis of Realistic Models}
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/scores.pdf}
+    \caption{Performance of recommendation systems under different bit error rates. Errors are injected into the weights in \textit{both embedding tables and neural networks} in each model. Results are averaged from 10 different runs of error injection with shaded areas covering the range of maximum and minimum scores observed.}
+    \label{fig:c3_pytei_performance_ber}
+\end{figure}
+
+
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/scores_embed.pdf}
+    \caption{Performance of recommendation systems under different bit error rates. Errors are injected into the weights in the \textit{embedding tables}. Results are averaged from 10 different runs of error injection with shaded areas covering the range of maximum and minimum scores observed.}
+    \label{fig:c3_pytei_performance_ber_embed}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/scores_nn.pdf}
+    \caption{Performance of recommendation systems under different bit error rates. Errors are injected into the weights in the \textit{neural networks} in each model. Results are averaged from 10 different runs of error injection with shaded areas covering the range of maximum and minimum scores observed.}
+    \label{fig:c3_pytei_performance_ber_nn}
+\end{figure}
+
+In \cref{fig:c3_pytei_performance_ber}, \cref{fig:c3_pytei_performance_ber_embed}, and \cref{fig:c3_pytei_performance_ber_nn}, we present the model performance of the evaluated realistic DRS models under different BERs from $10^{-9}$ to $10^{-2}$. The line shows the average of the AUC-ROC scores or accuracy while the shade represents their range observed from 10 individual experiments. We can first observe that the general trend is consistent with what we have observed from experiments on dummy models: with higher BER, the model performance suffers from higher quality degradation. Moreover, for most of the models, the scores exhibit noticeable quality loss after the BER of $10^{-6}$, which also aligns with our inference using dummy models. However, severe score drops start from $10^{-5}$ or $10^{-4}$ and most of the models becomes completely collapsed with BER higher than $10^{-3}$.
+
+By using dummy models we observe that different components inside the DRS model have different robustness characteristics. We also have similar observations from realistic models: the embedding tables are more robust against error as the significant error drops start after BER $10^{-3}$ as shown in \cref{fig:c3_pytei_performance_ber_embed}. The range of scores of 10 runs is also more consolidated near the average by having smaller shading areas. Moreover, models with more MLP architectures such as DCN, DFM and WD are less robust against hardware errors compared with embedding-dominant architectures such as FM (which only has MLP for the final predictor), based on \cref{fig:c3_pytei_performance_ber_nn}. 
+
+We have also observed that different datasets can also impact the model robustness. For dummy models, we use randomly synthesized data with fixed dimensions of dense and sparse features as well as the sparsity. However, it can be observed that models developed for the Criteo dataset are less robust against errors, as the BER where they exhibit noticeable score degradation is lower than that of the two MovieLens datasets. This can result from dataset-specific attributions, for example the models developed for Criteo have in general higher amount of MLP architectures compared with the rest datasets. The Criteo dataset has less sparsity which also influences the robustness of DRS model as analyzed using dummy models.
+
+As a summary, we can have the following insights: In general, the robustness of DRS against hardware error intuitively follows the trend of other deep learning models, i.e., the score gradually decreases when BER increases. However, robustness drastically (up to 2 orders of magnitude) vary between different models and datasets. Such huge variation, based on our analysis and observation, originates from two major aspects: the architectural differences and the characteristics of input data. DRS models with more MLP architectures, higher amount of dense input features and less sparsity in sparse input features are likely to be more susceptible against hardware errors and requires more intensive error mitigation. 
+
+\subsection{Experiments: Error Mitigation}
+\label{sec:c3_pytei_exp_em}
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\textwidth]{figures/c3exposure/pytei/scores_mitigation.pdf}
+    \caption{Comparison between no protection, activation clipping, and selective bit protection under different BERs. Results are averaged from 10 individual runs.}
+    \label{fig:c3_pytei_mitigation}
+\end{figure}
+\textbf{ABFT.} ABFT is proved to be effective to detect soft errors in DRS of having 99\% effectiveness and 10\% false positive of bit flip error detection with overhead below 26\% on various DRS architectures~\cite{li2022efficient}. However, most of such error correction methods are capable of single-error correcting and double-error detecting (SEC-DED), and simply re-execute when an error is detected but not correctable. However, when we attempt to implement ABFT, particularly when the BER is higher than $10^{-4}$, almost all the matrices for parameters contain multiple errors which always force re-execution of operations. Therefore, we conclude that such error-correction-code based methods work for intermittent, low-rate soft and transient errors caused by, e.g., cosmic rays and radiation effects yet are infeasible for scenarios with higher BERs which can come from logic and data-path errors, or voltage and frequency scaling.
+
+
+\textbf{Activation Clipping and SBP.} For activation clipping we manually clip the activations inside the range of $[-6, 6]$ (inspired by ReLU6~\cite{howard2017mobilenets}). For SBP, we protect the sign and exponent bits. Although this work, which aims to provide primary evaluation on the error mitigation methods for DRS, does not focus on exploring the optimal parameters for activation clipping or the bit positions to protect for specific DRS models, we provide functionality for users to customize those parameters in \PyTEI. We present the results of error mitigation using activation clipping and SBP in \cref{fig:c3_pytei_mitigation}. The BERs start from $10^{-5}$ since any lower BER does not incur significant degradation in score. We can observe that mostly, both of the error mitigation schemes are effective to regain some model performance across all the DRS models and all the datasets by 5\% to 30\%.
+
+The effectiveness of error mitigation also varies across different datasets. Generally, models that show stronger robustness (FM and AFM) as discussed in \cref{sec:c3_pytei_exp_real} also experience better recovery. Those observations align with our analysis that the MLP components inside DRS models, when having error, contribute to most of the performance degradation. Activation clipping is more effective on regaining the score loss for models that have deep MLP architectures such as DCN, WD and DFM, while SBP functions more effectively for embedding table dominated architectures. Efficiency-wise, protecting selective bit positions require dedicated mechanisms or hardware while clipping activation of MLP layers are less resource-limiting since it can be simply implemented by modifying the activation functions.
+
+\subsection{Discussion}
+\label{sec:c3_pytei_discussion}
+\subsubsection{Main Observations}
+In this section, we can discuss the main observations of this case study according to the research questions proposed at the end of \cref{sec:c3_pytei_method}:
+  
+\textbf{RQ1:} How will DRS models generally be impacted by hardware errors? What components inside a DRS model are more vulnerable to hardware errors, or vice versa?
+
+\textbf{A1:} Similar to other deep learning models, DRS models show certain robustness but can also be negatively impacted by hardware errors, depending on the error locations and rates. Different components inside a DRS exhibit different hardware error robustness due to the architectural differences and different roles they play in DRS. According to observations from \cref{sec:c3_pytei_exp_dummy} and \cref{sec:c3_pytei_exp_method}, MLP architectures are usually considered less robust while embedding tables are more robust against hardware errors. Therefore, we recommend future system designers to prioritize MLPs for protection to mitigate the impact of hardware errors.
+
+\textbf{RQ2:} How will hyper-parameters such as the hidden layer size of MLPs and the embedding dimensions affect the robustness against hardware errors?
+
+\textbf{A2:} Tuning the hyper-parameters will influence the robustness of DRS models. Similarly, different components inside DRS also exhibit different sensitivity on hyper-parameter tuning. In general, by increasing the hidden layer size of MLPs in DRS, the robustness suffers from more severe degradation compared with increasing the embedding dimension. Additionally, dense/sparse feature ratio and input sparsity are the unique robustness characteristics of DRS compared with other deep learning models, which are originated from the architectural difference between MLP and embedding components, as analyzed in \cref{sec:c3_pytei_exp_dummy}. 
+
+\textbf{RQ3:} Will error mitigation methods for other deep learning models such as ABFT, activation clipping and SBP still be effective for DRS models?
+
+\textbf{A3:} Conventional ABFT is implausible to enhance the robustness of DRS under our error scenario due to their theoretical limitations. Activation clipping and SBP are effective for the evaluated DRS models to recover degraded score. However, activation clipping is observed to be more effective than SBP since it specifically protects the MLP components inside the DRS model which are less robust against hardware errors based on our analysis. Activation clipping also requires less overhead compared with SBP as it can be implemented in algorithm level directly. 
+
+
+\subsubsection{Potential Benefits}
+Striving for (near-)zero error rates in hardware, while seemingly ideal, can impose significant performance and latency overhead on DRS systems due to the added redundancy. Thus, our findings of inherent error tolerance exhibited by DRS can be strategically leveraged for design optimizations, including targeted removal of redundancy and proactive frequency/voltage scaling. This case study, focused on comprehending and enhancing the robustness of DRS, holds the potential to enable systems to consistently provide real-time recommendations, even in the presence of hardware challenges. Additionally, it offers the opportunities to mitigate the timing latency or power overhead caused by design redundancy, ultimately leading to improvements in overall system performance. 
+
+
+\section{Understanding the Robustness of BERT Models Against Hardware Errors}
+\subsection{Introduction}
+Recently, transformer-based language models have demonstrated remarkable performance across a wide range of natural language processing (NLP) tasks, including conversational AI, machine translation, and sentiment analysis~\cite{zhao2023survey}. The success of these models largely depends on their ability to train and optimize large amounts of parameters in the millions or even billions. However, the increasing complexity and scale of these models demand significant computational resources. The development and deployment of these advanced language models require substantial support from high-performance computing systems, along with large clusters of specialized accelerators to meet the ever-tighting quality of service (QoS) requirements. These include not only model performance but also maintaining low tail-latency to ensure responsiveness in real-time applications~\cite{devlin2018bert, raffel2020exploring, radford2018improving}. As NLP models continue to evolve, the need for more sophisticated infrastructure will only intensify, highlighting the critical role of efficient hardware systems in sustaining this progress.
+
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width = .6\columnwidth]{./figures/c3exposure/bert/majorresults.pdf}
+%     \caption{Performance comparison between error-free, error-injected (BER: $10^{-6}$), and error-mitigated BERT models. The performance of BERT models can be significantly downgraded when we inject hardware errors into the model, while still can be recovered if applied with mitigation methods (parameter clipping).}
+%     \label{fig:majorresults}
+% \end{figure}
+
+As hardware systems continue to scale in both size and heterogeneity to accommodate the aforementioned computational demands, hardware errors have emerged as a significant reliability and dependability concern. Hardware errors (permanent faults, or transient soft errors) stem from various sources, including manufacturing defects, design flaws, environmental factors, aging and wear, and soft errors~\cite{gupta2012underdesigned}. There is also a growing interest in exploring the accuracy-efficiency tradeoff in DNNs systems, a concept commonly referred to as ``approximate computing'', which intentionally introduces errors as a part of design decisions to improve computational efficiency, using techniques such as voltage scaling~\cite{reagen2016minerva, kim2018matic}. These intentional errors, while providing efficiency gains, also add another layer of complexity to the overall robustness problem. With these motivations, we present an experimental study on the robustness of BERT models against the adverse effects of hardware errors. Our primary objective is to comprehensively scrutinize the interplay between hardware errors and the accuracy of model inferences.
+
+\subsection{Experimental Approach}
+\subsubsection{Error Model}
+In this work, we primarily focus on hardware errors (i.e., single/multi bit flips) in memory storing model parameters, which is aligned with existing studies~\cite{reagen2018ares, reagen2016minerva, kim2018matic}. For example, Minerva~\cite{reagen2016minerva} applies voltage scaling on SRAM storing model parameters which will be the context of the case study in Section~\ref{sec:c3exposure_bert_energy}. %This applies to situations such as errors in DRAM/SRAM which stores the model parameters. 
+For DRAM, recent studies show that bit flips can happen to DRAM even with error correction codes (ECC) such as SEC-DED, which can only correct single-bit errors. %Further, voltage scaling has been applied to SRAM to enable energy saving but could introduce bit flip errors~\cite{reagen2016minerva, kim2018matic}. 
+In this error model, each bit has a certain probability of getting flipped, referred to as the bit error rate (BER). %We focus on errors or perturbations in model parameters, e.g., weights in each layer. 
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width = 1\columnwidth]{./figures/c3exposure/bert/bitflip.pdf}
+    \caption{Two types of bit flip hardware errors, the exceptional error (left) and non-exceptional error (right), follow the IEEE-754 floating point standard.}
+    \label{fig:c3exposure_bert_sdc}
+\end{figure}
+
+Most state-of-the-art BERT models~\cite{devlin2018bert, lan2019albert, liu2019roberta, sanh2019distilbert} use the floating point (FP) data type by default following the IEEE-754 standard, where there are three fields of bits for a floating point number: a sign-bit, an exponent field, and a mantissa field. In the bit flip error model, each bit position in the FP may flip from ``1'' to ``0'' or vice versa, inducing numerical deviation from the original value. In this work, the hardware errors can be categorized into two different types based on the field where the flip occurs: (1) exceptional hardware error, where a certain bit flip can lead to abnormal values, such as not-a-number (NaN) or infinity (Inf). As indicated in \cref{fig:c3exposure_bert_sdc} (left), the exceptional hardware error could occasionally happen when the first bit in the exponent field of the floating point number is flipped. And (2) non-exceptional hardware error, which includes other bit flips that do not cause NaN or Inf but deviation from the original value, as shown in \cref{fig:c3exposure_bert_sdc} (right). 
+
+\begin{figure}[htbp]
+     \centering
+     {
+         \includegraphics[width=1\linewidth]{./figures/c3exposure/bert/framework.pdf}
+     }
+    \caption{Overview of the Error Injection and Mitigation of BERT Models}
+    \label{fig:c3exposure_bert_framework}
+ \end{figure}
+
+In \cref{fig:c3exposure_bert_framework}, we show an overview of the proposed methodology of error injection and mitigation of the BERT models. Specifically, we present how we inject errors into BERT models, apply mitigation techniques and implement a tool to facilitate the injection and mitigation process in the following sub-sections, respectively.
+
+\subsubsection{Error Injection to BERT}
+The impact of hardware errors on the robustness of a model can span across different granularities. In this work, we consider two different levels of granularity for performing error injection: model-wise and component-wise. At the granularity of model-wise error injection, bit-flip errors are injected across the trainable parameters in the entire model, while at the granularity of component-wise error injection,bit-flip errors are injected at specific types of components such as the encoders or embedding layers, where the other components are kept error-free. Generally, BERT models have three main types of components: the embedding layers, the encoders, and the pooler. The embedding layers combine token, segmentation, and positional (and other, if any) embeddings to project inputs into the feature space. The encoders project the embeddings into encoding/latent space representations, aggregated with the semantic information for the subsequent tasks. The pooler is an auxiliary component in some of the BERT models and is usually a linear layer with significantly less parameters than the other two components, therefore, we do not consider the pooler layer during component-wise error injection for concise implementation and experiments.
+
+As illustrated in \cref{fig:c3exposure_bert_dist}, we profile the distribution of parameter values using the ALBERT model~\cite{lan2019albert} as an example. We calculate the ratio of parameters in each component to the entire model, where the encoders, embedding layers, and pooler account for 62\%, 33\%, and 5\% of the total parameters. We focus on the encoders and embedding layers as the targets for component-wise error injection for their significance in parameter counts. 
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.46\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/overall_albert.pdf}
+        \caption{Overall}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.46\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/encoder_albert.pdf}
+        \caption{Encoder}
+    \end{subfigure}
+    
+    \begin{subfigure}[t]{0.46\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/embedding_albert.pdf}
+        \caption{Embedding}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.46\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/pooler_albert.pdf}
+        \caption{Pooler}
+    \end{subfigure}
+    
+    \caption{Parameter distribution of ALBERT model. Encoders, embedding layers, and pooler account for 62\%, 33\%, and 5\% of the total parameters respectively.}
+    \label{fig:c3exposure_bert_dist}
+\end{figure}
+
+
+\subsubsection{Error Mitigation via Parameter Clipping}
+Clipping is a widely used method to mitigate hardware errors in the convolutional neural network (CNN)~\cite{hoang2020ft, arjovsky2017wasserstein, wang2022pygfi}. Parameter clipping applies a ``clipping function'', as shown in \cref{eqn:clip}, in which hard-limits parameter values ($x$) based on pre-defined thresholds: the upper and lower bound $c$ and $f$.
+
+\begin{equation}
+        Clip(x, c, f) = max(f, min (x, c))
+\label{eqn:clip}
+\end{equation}
+
+We extend the model parameter clipping methods from CNNs to BERT models. However, it is challenging to find the appropriate upper/lower bound on parameters for the clipping function, as BERT models embrace different architectures from CNNs, and components within a BERT model also have different distributions of parameters, as shown in \cref{fig:c3exposure_bert_dist}. To tackle this challenge, we profile the error-free model offline to obtain the range of parameter values of each layer, based on which the bound will be determined in a layer-wise manner. Therefore, each layer has a customized bound from offline profiling for the online clipping. The exceptional errors, i.e., the NaN values are first replaced by 0 before the parameter clipping. In particular, we first fill in NaN values through the ``\textit{torch.nan\_to\_num()}'' function and implement the parameter clipping through the ``\textit{torch.clamp()}'' function with parameter configurations $c$ and $f$.
+
+\subsubsection{Implementation}
+There are existing error injection frameworks or tools such as PyTorch-FI~\cite{mahmoud2020pytorchfi}, GoldenEye~\cite{mahmoud2022goldeneye}, tensorFI~\cite{chen2020tensorfi}, etc., for neural networks that we can apply to language models. However, the largest obstacle that prevents them from being practically applied to comprehensive error robustness evaluation is their relatively slow speed and efficiency due to the lack of GPU acceleration of error injection, particularly for larger and deeper models with more parameters, and more injection locations, based on our experience. Another obstacle of these frameworks is the lack of a flexible interface to enable error mitigation and protection which is the crucial functionality to enable evaluation on mitigation. Therefore, we develop our tool to tackle these obstacles to practically enable efficient and comprehensive error injection and mitigation.
+
+\begin{algorithm}[htbp]
+% 
+    \caption{Error injection into BERT model}
+    \algrenewcommand\algorithmicrequire{\textbf{Input}}
+    \algrenewcommand\algorithmicensure{\textbf{Output}}
+    \begin{algorithmic}[1]
+    \Require Target model $M$, Target layer list $T$, Error Rate $P$
+    \Ensure Error Injected Model $M'$
+    \For{Layer $L$ in $M$} 
+        \State Layer Configuration $C_l$ $\leftarrow$ Profile($L$) 
+        \State Error Configuration $C_e$ $\leftarrow$ Profile($T$, $P$)
+        \If{$L$ in $T$} 
+            \State Error Map $Emap$ $\leftarrow$ Generation($L$, $C_l$, $C_e$)
+            \State $L$ $\leftarrow$ Injection($L$, $Emap$) 
+        \EndIf
+    \EndFor \\
+    \Return error injected model $M'$
+    \end{algorithmic}
+    \label{alg:errorinjection}
+\end{algorithm}
+
+It is non-trivial to implement the bit flip error injection simulation with a particular BER, especially given the exceptionally large number of parameters and bits involved in the BERT model. In this work, we implement error injection following \cref{alg:errorinjection} and \cref{fig:c3exposure_bert_framework}, which consists of the following steps: We first profile the specifications and statistics of the BERT model under evaluation, including data types, input specifications, layer modules, and parameter distributions (lines 1–2). We then configure the error injection such as the predefined BER and injecting targets (lines 3). After that, we locate the target layers or components (line 4) and generate a corresponding error injection map based on the layer types and the data formats (line 5). The error map embeds whether a parameter will be modified and which bit in the parameter to flip. Finally, we inject the hardware error into the BERT model by modifying parameter values based on the error map and return the error-injected model (lines 6–9). 
+
+The Error mitigation follows a similar process as shown in \cref{fig:c3exposure_bert_framework}: We first profile the layer bounds regarding the upper/lower bound values of each layer in the BERT model. We then configure the error mitigation with the layer bounds and apply parameter clipping for each layer, based on the profiled information and statistics. Finally, we apply parameter clipping to the parameters in target components and return the robustness-enhanced version of the model. 
+
+
+
+\subsection{Experimental Results}
+\subsubsection{Experimental Setup}
+
+We focus on BERT and its derivative models including BERT~\cite{devlin2018bert}, ALBERT~\cite{lan2019albert}, ROBERTA~\cite{liu2019roberta}, and DISTILBERT~\cite{sanh2019distilbert} models, with 110M, 12M, 125M and 67M trainable parameters respectively. All the models with their pre-trained weights are directly obtained from HuggingFace. 
+
+Details about dataset and benchmarks can be found at \cref{tab:c3exposure_LM_dataset}. The same validation set of data are used on error-free, error-injected and error-mitigated models to compare the model performance before error injection, after error injection and after error mitigation.
+
+ \begin{table}[htbp]
+ \centering
+    \begin{tabular}{cccccc}
+    \toprule
+    Task       & \#Train & \#Val & Metrics\\
+    \midrule
+    MRPC       &  3668                  &  408                     & Accuracy\\
+    RTE        &  2490                  &  277                     & Accuracy\\
+    SST2       &  67439                 &  872                     & Accuracy\\
+    COLA       &  8551                  &  1043                    & Matthew Correl.\\
+    SWAG       &  73000                 &  20000                   & Accuracy\\
+    SQUADV2    &  130319                &  11873                   & Exact Match, F1\\
+    \bottomrule  
+    \end{tabular}
+  \caption{Information on the NLP Datasets evaluated.}
+  \label{tab:c3exposure_LM_dataset}
+\end{table}
+
+\subsubsection{Results on Robustness Characterization}
+\label{sec:c3exposure_bert_results_chara}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/MRPC_overall_e.pdf}
+        \caption{MRPC\textsubscript{INJECTION}}
+        \label{fig:c3exposure_bert_1_1}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/RTE_overall_e.pdf}
+        \caption{RTE\textsubscript{INJECTION}}
+        \label{fig:c3exposure_bert_1_2}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/SST2_overall_e.pdf}
+        \caption{SST2\textsubscript{INJECTION}}
+        \label{fig:c3exposure_bert_1_3}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/COLA_overall_e.pdf}
+        \caption{COLA\textsubscript{INJECTION}}
+        \label{fig:c3exposure_bert_1_4}
+    \end{subfigure}
+
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/MRPC_miti_e.pdf}
+        \caption{MRPC\textsubscript{MITIGATION}}
+        \label{fig:c3exposure_bert_1_5}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/RTE_miti_e.pdf}
+        \caption{RTE\textsubscript{MITIGATION}}
+        \label{fig:c3exposure_bert_1_6}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/SST2_miti_e.pdf}
+        \caption{SST2\textsubscript{MITIGATION}}
+        \label{fig:c3exposure_bert_1_7}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/COLA_miti_e.pdf}
+        \caption{COLA\textsubscript{MITIGATION}}
+        \label{fig:c3exposure_bert_1_8}
+    \end{subfigure}
+
+    \begin{subfigure}[t]{0.6\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/legend_text.pdf}
+    \end{subfigure}
+
+    \caption{Hardware error robustness of different models under BER in the range of $[10^{-10}, 10^{-4}]$. Here we evaluate four text classification datasets (MRPC, RTE, SST2, COLA) from the GLUE benchmark. The upper row shows the error injection results while the second row illustrates the error mitigation results of the four language models across four text classification tasks.}
+    \label{fig:c3exposure_bert_exp_1}
+\end{figure}
+
+\textbf{Key Observation 1:} BERT models show \textbf{inherent} robustness to hardware errors up to a certain level before a sharp performance decline.
+
+
+We first evaluate the hardware error robustness of BERT models under model-wise error injection, i.e., the errors are injected into the parameters of the entire model. We select the BERs ranging from $10^{-10}$ to $10^{-4}$ and present the performance-BER curves in \cref{fig:c3exposure_bert_1_1} to \cref{fig:c3exposure_bert_1_4} as well as \cref{fig:c3exposure_bert_2_1} and \cref{fig:c3exposure_bert_2_3}. We can observe that BERT exhibits a stable accuracy when BER is smaller than a certain level, e.g. $10^{-7}$, before which hardware errors are unlikely to cause noticeable model performance loss. This is similar to the robustness level of MLP/CNN shown by previous studies~\cite{reagen2018ares}. However, once the BER increases beyond the point, higher BER will degrade the model performance. When the hardware errors are beyond this BER threshold, such performance decline becomes not ``graceful'' but ``sharp'', i.e., the model can quickly (within one order of magnitude beyond the cut-off point) become completely under-performed. 
+
+We ascribe such a sharp decline in performance to the propagation of errors in the model. Typically, when BER is higher than $10^{-7}$, since the total number of bits of the parameters of the BERT models are well above 10M, it is of high probability for multiple errors, both exceptional and non-exceptional, to occur. The NaN and/or Inf values from those errors are therefore more likely to be carried through propagation, interact with other deviated values and subsequently induce more exceptional errors, resembling a ``chain reaction'' that can destructively impair the performance of the model. %Such observation provides insightful guidance to designers that BERT models can tolerate hardware errors, as long as the BER is limited below the cut-off point, i.e., within the safe-zone.
+
+
+\textbf{Key Observation 2:} Different layers and components inside a BERT model can exhibit different levels of robustness against hardware errors. Particularly, the embedding layers are more robust than the encoder layers.
+
+
+We present the results of component-wise error injection in \cref{fig:c3exposure_bert_error_components}. We skip the first two BERs since the impact of errors is not imminent. We show that component-wise error injection to the encoders has a similar performance-BER trend with a cut-off BER of $10^{-7}$. However, embedding layers show $100X$ more error-tolerant compared with encoders as component-wise error injection to them does not induce significant performance drops observed until BER increases beyond $10^{-5}$. In \cref{sec:c3exposure_bert_example_outputs} (appendix), we further present several examples of model outputs when injecting errors to embedding \textbf{or} encoder layers. Although model are impacted in both cases, the encoder layers are more sensitive to hardware errors compared with the embedding layers by having completely broken outputs rather than a wrong but readable answer.
+
+
+% Considering the ALBERT, DISTILBERT, BERT and ROBERTA models have 4M, 23M, 24M and 39M of parameters in the embedding layers respectively, such differences of robustness may indicate that more parameters in the embedding layers may provide higher robustness.
+
+
+\subsubsection{Results on Error Mitigation}
+
+
+
+\textbf{Key Observation 3:} Parameter clipping can effectively mitigate the impact of hardware errors in BERT models.
+
+
+
+In \cref{fig:c3exposure_bert_1_5} to \cref{fig:c3exposure_bert_1_8} as well as \cref{fig:c3exposure_bert_2_2} and \cref{fig:c3exposure_bert_2_4}, we present the performance-BER results when parameter clipping is applied as the hardware error mitigation. Compared to BERT models without error mitigation, parameter clipping can significantly enhance the robustness of BERT models by up to $100X$ across all models and datasets, as the cut-off BER is pushed to the right for up to two orders of magnitude. The most notable advantage of using parameter clipping beyond robustness enhancement is its efficiency, as it is essentially based on comparison operation and does not require noticeable memory or computational overheads like TMR or ECC. The error mitigation employs the tensor-wise clipping function to mitigate the influence of hardware errors in model parameters, which is more efficient than element-wise corrections. Thresholds for clipping can also be computed off-line and in a significantly shorter time compared with other off-line methods such as retraining and/or fine-tuning.
+
+Error mitigation, however, has different levels of effectiveness across models and applications. In \cref{fig:c3exposure_bert_1_7}, using the SST2 dataset as an example, the ALBERT model has a substantial performance drop of more than 30\% even after error mitigation while the BERT and ROBERTA model has less severe drops (about 10\%). Such observation indicates that the BERT model with more parameters provides additional elasticity against hardware errors than the smaller models. 
+
+\subsubsection{Results on Model Configuration}
+
+\textbf{Key Observation 4:} Model configurations, such as the same model with different architectural hyper-parameters could also impact model robustness.
+
+
+We first evaluate the impact of different hidden state dimensions (768 and 1024) on model robustness. Specifically, we explore two different versions of ALBERT: ALBERT\textsubscript{BASE} and ALBERT\textsubscript{LARGE} with hidden state dimensions of 768 and 1024, respectively. \cref{fig:c3exposure_bert_a_11} to \cref{fig:c3exposure_bert_a_13} show that ALBERT\textsubscript{LARGE} has a slightly higher robustness compared with ALBERT\textsubscript{BASE}. We attribute such observation to the 50\% more parameters brought by the higher hidden state dimension. However, since the difference of parameters between ALBERT\textsubscript{BASE} and ALBERT\textsubscript{LARGE} is still insignificant (compared to that between ALBERT\textsubscript{BASE} and larger models such as BERT), the robustness enhancement via increased hidden state dimension is marginal and rather limited. 
+
+We also evaluate the impact of different tokenizers i.e., DISTILBERT\textsubscript{UNCASED} and DISTILBERT\textsubscript{CASED}, where the uncased model lower-cases the input texts before the embedding. \cref{fig:c3exposure_bert_a_21} and \cref{fig:c3exposure_bert_a_22} reveal that using cased or uncased tokenizers will not show a significant difference under model-wise error injection and component-wise error injection to encoders. However, \cref{fig:c3exposure_bert_a_23} (component-wise error injection to embedding layers) shows that DISTILBERT\textsubscript{CASED} exhibits higher robustness than DISTILBERT\textsubscript{UNCASED}. For instance, at $10^{-4}$ BER, the embedding layers in DISTILBERT\textsubscript{UNCASED} experience a more than 20\% accuracy drop compared with 5\% for DISTILBERT\textsubscript{CASED}. The cased and uncased tokenizers have different vocabulary sizes, which can potentially influence the sensitivity of BERT models to bit-flip errors. According to our experiment, the uncased tokenizer may lead to reduced robustness to hardware errors, and the embedding layers are more likely to be impacted due to its proximity to the tokenizer in architecture.
+
+\begin{table}[htbp]
+ \centering
+    \begin{tabular}{cccccc}
+    \toprule
+    Task       & \#Train & \#Val & Metrics\\
+    \midrule
+    MRPC       &  3668                  &  408                     & Accuracy\\
+    RTE        &  2490                  &  277                     & Accuracy\\
+    SST2       &  67439                 &  872                     & Accuracy\\
+    COLA       &  8551                  &  1043                    & Matthew Correl.\\
+    SWAG       &  73000                 &  20000                   & Accuracy\\
+    SQUADV2    &  130319                &  11873                   & Exact Match, F1\\
+    \bottomrule  
+    \end{tabular}
+  \caption{Information on the NLP Datasets evaluated.}
+  \label{tab:c3exposure_bert_LM_dataset}
+\end{table}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/SQUAD_overall_e.pdf}
+        \caption{SQUAD\textsubscript{INJECTION}}
+        \label{fig:c3exposure_bert_2_1}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/SQUAD_miti_e.pdf}
+        \caption{SQUAD\textsubscript{MITIGATION}}
+        \label{fig:c3exposure_bert_2_2}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.45\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/SWAG_overall_e.pdf}
+        \caption{SWAG\textsubscript{INJECTION}}
+        \label{fig:c3exposure_bert_2_3}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.45\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/SWAG_miti_e.pdf}
+        \caption{SWAG\textsubscript{MITIGATION}}
+        \label{fig:c3exposure_bert_2_4}
+    \end{subfigure}
+    \caption{Hardware error robustness of BERT model under BER in the range of $[10^{-10}, 10^{-4}]$. Here we evaluate the BERT model on the SQUADV2 question-answering benchmark and SWAG multi-choice benchmark, the error injection simulation results illustrated in~\cref{fig:c3exposure_bert_2_1} and~\cref{fig:c3exposure_bert_2_3}. The~\cref{fig:c3exposure_bert_2_2} and~\cref{fig:c3exposure_bert_2_4} are the error mitigation result on each task.}
+    \label{fig:c3exposure_bert_exp_2}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/BERT_MRPC.pdf}
+        \caption{BERT}
+        \label{fig:c3exposure_bert_bm}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/ALBERT_MRPC.pdf}
+        \caption{ALBERT}
+        \label{fig:c3exposure_bert_am}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/DISTILBERT_MRPC.pdf}
+        \caption{DISTILBERT}
+        \label{fig:c3exposure_bert_dm}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/ROBERTA_MRPC.pdf}
+        \caption{ROBERTA}
+        \label{fig:c3exposure_bert_rm}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.8\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/legend_comp.pdf}
+    \end{subfigure}
+    \caption{Hardware error robustness of BERT model components under BER in the range of $[10^{-8}, 10^{-4}]$. Here we evaluate the encoders and embedding layers in four different BERT models on the MRPC dataset.}
+    \label{fig:c3exposure_bert_error_components}
+\end{figure}
+
+\begin{figure}[htbp]  
+\centering
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/ALBERT_MRPC_OVERALL_.pdf}
+        \caption{ALBERT}
+        \label{fig:c3exposure_bert_a_11}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/ALBERT_MRPC_ENCODER_.pdf}
+        \caption{ALBERT-ENCODER}
+        \label{fig:c3exposure_bert_a_12}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.36\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/ALBERT_MRPC_EMBEDD_.pdf}
+        \caption{ALBERT-EMBEDDING}
+        \label{fig:c3exposure_bert_a_13}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.4\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/albert_legend1.pdf}
+    \end{subfigure}
+    \caption{Hardware error robustness of BERT models with different model configurations under BER in the range of $[10^{-8}, 10^{-4}]$. Here we evaluate the ALBERT\textsubscript{BASE} and ALBERT\textsubscript{LARGE} models on the MRPC dataset in \cref{fig:c3exposure_bert_a_11} (model-wise), \cref{fig:c3exposure_bert_a_12} (component-wise, encoders), and \cref{fig:c3exposure_bert_a_13} (component-wise, embedding layers).}
+    \label{fig:c3exposure_bert_ablation1}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+    \begin{subfigure}[t]{0.45\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/DISTILBERT_MRPC_OVERALL_.pdf}
+        \caption{DISTILBERT}
+        \label{fig:c3exposure_bert_a_21}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.45\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/DISTILBERT_MRPC_ENCODER_.pdf}
+        \caption{DISTILBERT-ENCODER}
+        \label{fig:c3exposure_bert_a_22}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.45\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/DISTILBERT_MRPC_EMBEDD_.pdf}
+        \caption{DISTILBERT-EMBEDDING}
+        \label{fig:c3exposure_bert_a_23}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.4\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figures/c3exposure/bert/distilbert_legend.pdf}
+    \end{subfigure}
+    \caption{Hardware error robustness of BERT models with different model configurations under BER in the range of $[10^{-8}, 10^{-4}]$. Here we evaluate the DISTILBERT\textsubscript{UNCASED} and DISTILBERT\textsubscript{CASED} models on the MRPC dataset in \cref{fig:c3exposure_bert_a_21} (model-wise), \cref{fig:c3exposure_bert_a_22} (component-wise, encoders), and \cref{fig:c3exposure_bert_a_23} (component-wise, embedding layers).}
+    \label{fig:c3exposure_bert_ablation2}
+\end{figure}
+
+
+\subsubsection{Example Model Outputs}
+\label{sec:c3exposure_bert_example_outputs}
+
+\textbf{Key Observation 2} in \cref{sec:c3exposure_bert_results_chara} mentions encoder layers are typically more sensitive to errors. Here we present several example outputs of the BERT model with the SQUADV2 dataset, where we \textbf{separately} inject errors in encoder layers and embedding layers using the same BER. We can observe that when errors are injected to encoder layers, outputs from model are completely broken and unrelated to the context provided. When errors are injected to embedding layers, although the outputs are still incorrect, they are still readable and related to the context provided.
+
+\begin{figure}[htbp]
+\small
+\textbf{Context:} Tension forces can be modeled using ideal strings that are massless, frictionless, unbreakable, and unstretchable. They can be combined with ideal pulleys, which allow ideal strings to switch physical direction. Ideal strings transmit tension forces instantaneously in action-reaction pairs so that if two objects are connected by an ideal string, any force directed along the string by the first object is accompanied by a force directed along the string in the opposite direction by the second object. By connecting the same string multiple times to the same object through the use of a set-up that uses movable pulleys, the tension force on a load can be multiplied. For every string that acts on a load, another factor of the tension force in the string acts on the load. However, even though such machines allow for an increase in force, there is a corresponding increase in the length of string that must be displaced in order to move the load. These tandem effects result ultimately in the conservation of mechanical energy since the work done on the load is the same no matter how complicated the machine.
+
+\textbf{Question:} What is the final effect of adding more and more idea strings to a load?
+
+\textbf{Outputs from error-free model:} conservation of mechanical energy
+
+\textbf{Outputs from model with errors injected to encoder layers:} Ten
+
+\textbf{Outputs from model with errors injected to embedding layers:} Ideal strings transmit tension forces instantaneously in action - reaction pairs so that if two objects are connected by an ideal
+
+
+\textbf{Context:} To measure the difficulty of solving a computational problem, one may wish to see how much time the best algorithm requires to solve the problem. However, the running time may, in general, depend on the instance. In particular, larger instances will require more time to solve. Thus the time required to solve a problem (or the space required, or any measure of complexity) is calculated as a function of the size of the instance. This is usually taken to be the size of the input in bits. Complexity theory is interested in how algorithms scale with an increase in the input size. For instance, in the problem of finding whether a graph is connected, how much more time does it take to solve a problem for a graph with 2n vertices compared to the time taken for a graph with n vertices?
+
+\textbf{Question:} How is the time needed to obtain the solution to a problem calculated?
+
+\textbf{Outputs from error-free model:} as a function of the size of the instance
+
+\textbf{Outputs from model with errors injected to encoder layers:} To
+
+\textbf{Outputs from model with errors injected to embedding layers:} a computational problem, one may wish to see how much time the best algorithm requires to solve the problem
+
+\textbf{Context:} In the aftermath of generally poor French results in most theaters of the Seven Years' War in 1758, France's new foreign minister, the duc de Choiseul, decided to focus on an invasion of Britain, to draw British resources away from North America and the European mainland. The invasion failed both militarily and politically, as Pitt again planned significant campaigns against New France, and sent funds to Britain's ally on the mainland, Prussia, and the French Navy failed in the 1759 naval battles at Lagos and Quiberon Bay. In one piece of good fortune, some French supply ships managed to depart France, eluding the British blockade of the French coast.
+
+\textbf{Question:} What naval battles did France lose in 1759?
+
+\textbf{Outputs from error-free model:} Lagos and Quiberon Bay
+
+\textbf{Outputs from model with errors injected to encoder layers:} In
+
+\textbf{Outputs from model with errors injected to embedding layers:} the Seven Years ' War
+
+
+\caption{Example outputs of the BERT model with the SQUADV2 dataset, errors are injected into encoder layers and embedding layers separately.}
+\end{figure}
+
+\subsubsection{Case Study: Energy Saving}
+\label{sec:c3exposure_bert_energy}
+
+
+\textbf{Key Observation 5:} We can leverage the inherent hardware error tolerance of BERT models to achieve energy saving. With mitigation methods applied, the energy saving can be further enhanced.
+
+
+According to Key Observation 1, we notice that BERT models have a certain level of inherent error tolerance to bit-flips. This tolerance of BERT models can directly converse to the energy saving through voltage scaling, as shown in previous research~\cite{di2019pushing}. To comprehensively analyze the trade-off between energy efficiency and performance of the BERT model, we apply voltage scaling on SRAM in FDX22 (22nm) technology, holding the BERT model weights parameters (similar to Minerva~\cite{reagen2016minerva}), and explore the energy saving of BERT models with inherent and improved robustness to bit-flip errors. Voltage scaling leads to bit flips in SRAM bitcells with a certain probability~\cite{di2019pushing}, where the BER is a function of voltage level. 
+%The relationship between BER and SRAM voltage is expressed as $BER = 2*10^{8}~* ~e^{-61.69 * V_{dd}}$, where voltage scaling will induce random bit-flips in SRAM with a specified level of BER~\cite{di2019pushing}. 
+Specifically in this context, SRAM operates with a nominal $V_{dd}$ at 0.8V and under the BER at $<10^{-13}$.
+
+\begin{table}[htbp]
+\centering
+
+\begin{tabular}{ccccccc}
+\toprule
+Dataset      & BERT         & ALBERT            & ROBERTA         & DISTILBERT\\
+\midrule                             
+MRPC       &49/61.5   & 49/55.5 & 49/61.5 & 49/61.5\\
+RTE        &49/61.5   & 49/55.5 & 49/61.5 & 49/61.5\\ 
+SST2       &49/61.5   & 49/61.5 & 49/61.5 & 49/67.1\\
+COLA       &49/61.5   & 49/55.5 & 49/61.5 & 49/61.5\\ 
+SWAG       &49/61.5   & -/-   & -/- & -/-\\
+SQUADV2    &49/61.5   & -/-   & -/- & -/-\\ 
+
+\bottomrule
+\end{tabular}
+\caption{Energy saving (\%) of different BERT models with inherent/improved (with parameter clipping) error robustness. ``-/-'' refers to unable to meet the acceptable quality loss.}
+\label{tab:c3exposure_bert_energy}
+\end{table}
+
+
+In this work, the evaluation of energy saving is represented as the ratio of reduced energy consumption between the voltage scaled and the nominal SRAM, which is conducted using the expression $P = CV^2\textit{f}$. Our experimental results demonstrate that, when we use 5\% as the maximum acceptable accuracy loss, the inherent robustness of the BERT models yields an average of 49\% energy savings across all benchmarks. Furthermore, in the scenarios of the BERT model with parameter clipping enabled, the energy saving ratio can be further raised to 67.1\% as the model can tolerate a higher BER. It is also worth mentioning that the parameter clipping approach has negligible hardware design overheads, since it can be completed off-line before model deployment.
+
+\section{Workload Aware Approximate Computing Configuration}
+
+Approximate computing has recently arisen as a promising solution for improving energy efficiency in post-Moore's era. Its success has been demonstrated in many modern applications such as image processing~\cite{liu2015analytical, gupta2011impact}, machine learning~\cite{akhlaghi2018lemax, jiao2018energy}, and bio-signal analysis~\cite{prabakaran2019xbiosip}. These applications typically show inherent error tolerance, i.e., they do not require completely accurate computations for delivering acceptable output quality. Utilizing such error tolerance, approximate computing ``intentionally'' seeks to design imperfect hardware to trade off accuracy for better energy efficiency. Specifically, researchers have developed approximate arithmetic units through inexact logic structure such as approximate adders~\cite{akbari2016rap, liu2015analytical, jiao2017combining} and multipliers~\cite{vahdat2017letam, liu2014low, hashemi2015drum}. While offering improvements, these methods also face several challenges to put approximate computing to practical use.
+
+One major challenge of approximate computing is how to control the output quality, especially considering that output quality is heavily application and input dependent~\cite{jiao2017clim, akhlaghi2018lemax}. Another challenge is how to identify a proper configuration of approximate computing from a large search space. This is because approximate units usually have multiple approximation settings. For example, the approximate adder developed in~\cite{akbari2016rap} has four settings, each of which has an unique structure, resulting in different energy-error profile. Using a uniform configuration for all the target units across the entire program may limit the potential gains and calls into question the value of approximate computing. 
+
+There are several studies on this problem~\cite{akhlaghi2018lemax, li2015joint, tabatabaei2018achilles}. For example, Gupta \textit{et al.} proposed a gradient descent-based optimization method to select approximation settings for machine learning applications~\cite{akhlaghi2018lemax} in an hardware-independent manner, and Hu \textit{et al.} proposed integer linear programming (ILP)-based optimization to select approximate settings~\cite{li2015joint} in FPGA. In this work, we will also focus on hardware-independent approximation configuration at the program level. 
+However, in these studies, the final output quality is typically formulated as a mathematical function of the approximation error of individual approximate units. For example, the final output in~\cite{li2015joint} is expressed as a linear function of each individual approximate unit. Such formulation does not fully reflect the impact of input workload on quality estimation. 
+
+
+To tackle such limitations, we propose a workload-aware algorithmic approach that can automatically identify proper approximation configuration for energy minimization under quality guarantee. This is implemented in a tool called \WoAxC. We formulate the problem as a constrained combinatorial optimization problem and solve it using evolutionary searching algorithm. We perform three steps to construct \WoAxC: (1) integrating approximate units into the data flow graph (DFG) of the given program and emulating the program over the given input workload, (2) formulating the problem of minimizing energy under quality constraints as a constrained combinatorial optimization problem, and (3) identifying the proper approximation configuration using an evolutionary search algorithm to solve the optimization problem. 
+
+\subsection{Motivating Case Study}
+\label{sec:c3_woaxc_background}
+This section describes how errors are injected to programs, and the impact of input workload on approximate computing. 
+
+\subsubsection{Error Injection to Program DFG}
+\begin{figure}[htbp]
+  \centering
+  
+  \begin{subfigure}[b]{0.24\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/main.png}
+      \caption{Original}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.24\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/multiplier.png}
+      \caption{Apx. multiplier}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.24\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/adder.png}
+      \caption{Apx. adder}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.24\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/main_apx.png}
+      \caption{Apx. adder and multiplier}
+  \end{subfigure}
+  
+  \caption{The injection of approximation error into data flow graph. $\omega$ and $\alpha$ are the average relative error of adder and multiplier respectively.}
+  \label{fig:c3_woaxc_dfg-error}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  
+  \begin{subfigure}[b]{0.4\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/approx-adders.pdf}
+      \caption{Approximate Adders}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.4\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/approx-multipliers.pdf}
+      \caption{Approximate Multipliers}
+  \end{subfigure}
+  
+  \caption{Energy-error trade-off for approximate adders and multipliers under different settings. A0 and M0 are the exact setting, and A$X$ and M$X$ are approximation settings.}
+  \label{fig:c3_woaxc_energy-error-trade-off}
+\end{figure}
+
+We target two most-widely used approximate units, approximate adders and approximate multipliers. We choose approximate adders from RAP-CLA~\cite{akbari2016rap}, which includes four approximation configurations (referred as $A0$ - $A4$). We choose approximate multipliers from AQ-LETAM~\cite{vahdat2017letam}, which includes five approximation configurations (referred as $M0$ - $M5$). We use the relative error as the error metric to represent the approximation error of each unit, based on which we inject errors to the program DFG. The error injection of approximate multipliers and adders to DFGs are presented in \cref{fig:c3_woaxc_dfg-error}. Take an adder as an example, if the original addition is $c = a + b$, the post-approximation result would become $c = (a + b) * (1 + \omega)$, where $\omega$ is the relative error. We illustrate the energy-error tradeoff of approximate units with different approximation settings in \cref{fig:c3_woaxc_energy-error-trade-off}, based on which we can see that the energy decreases with the increase of approximation error. Note that while we focus on relative error as error metric in this work, \WoAxC ~can be naturally extended to other error metrics such as error rate because the quality evaluation is performed by emulating real programs. 
+
+\subsubsection{Impact of Input Workload}
+We use Sobel filter as an example, one of the most widely-used image processing application, to show the impact of input workload on the quality of approximate computing. The DFG of Sobel filter has 18 multipliers and 17 adders, each of which can adopt a different setting.
+
+\begin{figure}
+  \centering
+  
+  \begin{subfigure}[b]{0.27\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/sobel-cat-approx.png}
+      \caption{Cat 22.71dB}
+      \label{fig:c3_woaxc_path1}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.27\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/sobel-dog-approx.png}
+      \caption{Dog 16.83dB}
+      \label{fig:c3_woaxc_path2}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.345\columnwidth}
+      \centering
+      \includegraphics[width=\columnwidth]{./figures/c3exposure/woaxc/sobel-butterfly-approx.png}
+      \caption{Butterfly 13.36dB}
+      \label{fig:c3_woaxc_path3}
+  \end{subfigure}
+  
+  \caption{Same approximate setting applied to Cat, Dog, and Butterfly images for Sobel filter}
+  \label{fig:c3_woaxc_golden-approx-images}
+\end{figure}
+
+We randomly choose an approximation configuration for all the 35 target units. 
+Then, we feed three different images as input for Sobel filter --- cat, dog, and butterfly. As shown in \cref{fig:c3_woaxc_golden-approx-images}, the output of the three input images are different. The output of cat image has a PSNR of 22dB while the output of dog and butterfly images have noted distortions with only 16dB and 13dB respectively. This difference suggests that even under same approximation configuration, different input workload will lead to different output quality. This key observation motivates us to explore workload-aware approximate computing. 
+
+
+\subsection{\WoAxC~ Framework}
+\label{sec:c3_woaxc_framework}
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[keepaspectratio,width=0.75\columnwidth]{figures/c3exposure/woaxc/cacm_overview.pdf}
+    \caption{\WoAxC~ framework}
+    \label{fig:c3_woaxc_cacm}
+\end{figure}
+
+The identification of a proper approximation setting can be formulated as a constrained combinatorial optimization problem, i.e., find an approximation configuration vector $s$ for all the target units in an application that:
+\begin{equation}
+  \begin{gathered}
+       \min_{s}{Energy(A,I,s)} \\
+    s.t. \text{ } QualityLoss(A,I,s) < \sigma  
+    \end{gathered}  
+\end{equation}
+where $A$ represents the application program, $I$ represents the input workload and $\sigma$ is the user-defined constraint of quality loss. Note that the quality loss is a strong function of $I$. 
+
+The entire flow of the \WoAxC ~is illustrated in \cref{fig:c3_woaxc_cacm}, with several key steps: first, users will feed the information regarding application program $A$, input workload $I$ and quality constraints $\sigma$ into the \WoAxC. The error-energy profile of approximate units will also be fed into \WoAxC. \WoAxC ~will then determine a specific configuration for the available configurable approximate units to minimize energy consumption, while meeting the quality constraints. The most intuitive way to find the solution is through brute-force search. However, the search space complexity is prohibitively huge: if there are $n$ computation units and each unit has $m$ different configurations, the search space size is $m^n$. Using Sobel filter as an example, the search space is $5^{18} * 4^{17} = 6.5536e+22$. Directly applying heuristic solution will result in a significantly long search time. 
+
+To tackle such issue, we develop a two-phase approach for \WoAxC: pruning and searching. Pruning phase will first reduce the search space by eliminating infeasible solutions. This is key to enabling an efficient search action. Then, the search phase will use evolutionary algorithm to search for the solution.  
+
+
+\subsubsection{Pruning}
+\begin{algorithm}
+
+    \caption{\WoAxC ~Pruning}
+    \algrenewcommand\algorithmicrequire{\textbf{Input}}
+    \algrenewcommand\algorithmicensure{\textbf{Output}}
+    \begin{algorithmic}[1]
+    \Require The application $A$; list of possible settings $P$. 
+    \Ensure Feasible search space $S$
+    \State $S = \{\}$
+    \For{each unit $A[i]$ in application $A$} 
+    \State $A[i] \gets P[0]$ //$P[0]$ is the unit with minimum error in $P$.
+    \EndFor
+    \For{each unit $A[i]$ in application $A$} 
+    \For{each available setting $P[j]$ in $P$} 
+    \State $A[i] \gets P[j]$ and run application $A$
+    \If{$QualityLoss(A) > QualityConstraint()$}
+    \State $S.append(P[j-1])$
+    \State $A[i] \gets P[0]$
+    \State break
+    \EndIf
+    \EndFor
+    \EndFor \\
+    \Return $S$
+    \end{algorithmic}
+    \label{alg:c3_woaxc_ap}
+\end{algorithm}
+
+ 
+The pruning process is shown in \cref{alg:c3_woaxc_ap}. 
+We start with examining if each individual unit is amenable to approximation, and, if so, to what extent. 
+When examining the approximation amenability of a specific unit, all the other units are configured without any approximation, i.e., using exact settings $A0$/$M0$ (Line 2, Line 3). For this specific unit, the approximation level will be sequentially enhanced and applied, starting from no approximation ($A0$/$M0$), to $A1$/$M1$, $A2$/$M2$, etc. 
+
+Under each approximation setting, the program DFG will be emulated under corresponding error injection and the output quality will be evaluated against the user-defined quality constraints. If the output satisfies the user-defined constraints, the approximation level will be further enhanced. Then, the program DFG will be emulated and the output quality will be evaluated again. Similarly, this process will be iteratively executed until the output quality does not meet the constraints (Line 8). This suggests that previous approximation setting is the boundary approximation level for this unit and cannot be enhanced further, otherwise the quality constraint will be violated. 
+
+By repeating such process for each target unit in the DFG, we can obtain a boundary setting for each unit (Line 9). Any setting beyond this boundary set will be infeasible due to quality constraints violation. In the rare case that if the lowest approximation level of a certain unit can lead to a quality violation, this unit is deemed as a ``critical'' unit and is not amenable to approximation at all. The output of this pruning process eliminates a significant amount of infeasible solutions, which drastically reduces the search space of applications. 
+
+\subsubsection{Searching}
+\begin{algorithm}
+
+    \caption{\WoAxC ~Searching}
+    \algrenewcommand\algorithmicrequire{\textbf{Input}}
+    \algrenewcommand\algorithmicensure{\textbf{Output}}
+    \begin{algorithmic}[1]
+    \Require The application $A$; feasible search space $S$. 
+    \Ensure Optimized population $C$
+    \State Randomly generate initial population $C$ within $S$
+    \For{each chromosome $C[k]$ in $C$}
+    \State run $A$ with settings of $C[k]$
+    \If{$QualityLoss(A) > QualityConstraint()$}
+    \State delete $C[k]$ from $C$ 
+    \EndIf
+    \EndFor
+    \While{not terminate}
+    \State $C.children \gets GA(C)$ //Generate children based on the current population
+    \State $C \gets TopFit(C, C.children)$ //Only the fittest can survive
+    \EndWhile \\
+    \Return $C$
+    \end{algorithmic}
+    \label{alg:c3_woaxc_gen}
+\end{algorithm}
+
+
+After obtaining the pruned solution space, we develop a customized search process based on genetic algorithm (GA), one of the most-widely used evolutionary algorithms, to solve this combinatorial optimization problem. The basic idea of GA is that natural evolution will choose the fittest species over time. Note that many heuristic methods such as simulated annealing can be used to solve the problem. While the selection and comparison of different heuristic methods are beyond the scope of this work, GA naturally fits our problem because the approximation settings can be easily interpreted and encoded as genes. To customize and apply genetic algorithm in finding the solution, we define the following items: 
+\begin{itemize}
+    \item Definition - representation of chromosomes 
+    \item Population generation - crossover and mutation
+    \item Population selection and elimination - fitness function
+    \item Termination conditions
+\end{itemize}
+
+We describe our customized GA in \cref{alg:c3_woaxc_gen}, which consists of the following stages.
+
+\textbf{Chromosomes}
+We define each individual chromosome as an approximation configuration vector. Each gene in the chromosome indicates the approximation configuration for a specific unit. The length of a chromosome depends upon the number of target units in a given application.
+
+\textbf{Population}
+After pruning, a set of initial populations is randomly generated. Note that, every individual in this initial population must meet quality constraints. If one individual fails to meet the constraints, it will be immediately eliminated. 
+
+In \WoAxC, we apply two genetic operations to generate future generations, crossover and mutation. Crossover is to produce a child chromosome with segments from two parent chromosomes based on one (or more) crossover points. We adopt random two-point crossover mechanism which randomly selects two crossover points in the chromosome. The genes between the two crossover points from the two chromosomes will be swapped to produce children. 
+
+Mutation is to randomly modify the gene on one parent chromosome to produce a child chromosome. We adopt random two-point mutation algorithm which randomly selects two mutation points in the chromosome and replace them with random genes. 
+
+\textbf{Fitness Function}
+The fitness function is to determine which individuals can survive. Since our objective is to minimize the energy consumption, we compute the fitness value based on the energy consumption of each individual. The fitness function is based on elitism selection, i.e., only a certain number of individuals with the best fitness values will survive. Empirically, we retain the best 10 individuals in our experiment. 
+
+\textbf{Termination Condition}
+Termination conditions indicate the end of searching. If the GA iteration count or running time surpasses the user-defined limitation, or if further generations cannot produce more elite children, searching will terminate. After this step, we can have solutions to the optimization problem. 
+
+
+
+\subsection{Experimental Results}
+\label{sec:c3_woaxc_results}
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[keepaspectratio, width = .9\columnwidth]{./figures/c3exposure/woaxc/energy-savings-extra1.pdf}
+    \caption{Energy saving under different quality loss}
+    \label{fig:c3_woaxc_tradeoff}
+\end{figure}
+
+\begin{table}[htbp]
+\tiny
+  \centering
+  \caption{Search space size reduction by pruning}
+    \begin{tabular}{cccccccccc}
+    \toprule
+     & \multicolumn{3}{c}{Sobel} & \multicolumn{3}{c}{Prewitt} & \multicolumn{3}{c}{Laplacian}\\
+     & butterfly & cat & dog & butterfly & cat & dog & butterfly & cat & dog\\ 
+    \midrule
+    Before  & $6.55\times10^{22}$ & $6.55\times10^{22}$ & $6.55\times10^{22}$ & $6.55\times10^{22}$ & $6.55\times10^{22}$ & $6.55\times10^{22}$ & $1.28\times10^{11}$ & $1.28\times10^{11}$ & $1.28\times10^{11}$\\
+    After  & $2.62\times10^{10}$ & $9.06\times10^{14}$ & $3.69\times10^{9}$ & $1.97\times10^{11}$ & $1.64\times10^{17}$ & $8.96\times10^{12}$ & $1.01\times10^{5}$ & $3.28\times10^{7}$ & $2.025\times10^{5}$ \\
+    Ratio & $2\times10^{12}$ & $7\times10^{7}$ & $1\times10^{13}$ & $3\times10^{11}$ & $4\times10^{5}$ & $7\times10^{9}$ & $1.3\times10^{6}$ & $3.9\times10^{3}$ & $6.3\times10^{5}$\\
+    \bottomrule
+    \end{tabular}%
+
+  \label{tab:c3_woaxc_prune}%
+\end{table}%
+
+\subsubsection{Experimental Setup}
+We select and implement three widely-used image processing applications: Sobel Filter, Prewitt Filter and Laplacian Filter. Both Sobel filter and Prewitt filter have 35 target units, among which 18 units are multipliers and the other are adders. Laplacian filter has 17 units, among which 9 are multipliers and the other are adders. We adopt three different datasets: Butterlfy Dataset, Dogs dataset, and Cats Dataset~\cite{kaggle}. We implement \WoAxC ~in Python. We define $PSNR\geq30dB$ as acceptable quality for a single image~\cite{mittal2016survey}. For a dataset, we define the quality loss $q$ as $q =  \frac{n}{m}$, where $n$ is the number of unacceptable images (i.e., PSNR$<$30dB), while $m$ is the total number of images in the dataset. Without loss of generality, we assume three different quality constraints ($q$): 0\%, 2.5\%, and 5\%.
+
+\textbf{Baseline} A direct comparison with existing approaches are infeasible~\cite{li2015joint, tabatabaei2018achilles, mrazek2019autoax, akhlaghi2018lemax} because their problem formulation is not so tightly connected with input workload: we measure the quality loss through a direct program DFG emulation over input workload and approximation configuration, while the existing approaches mostly estimate quality loss based on approximation configuration only. Therefore, we compare \WoAxC ~with a workload-unaware approach that uses GA to identify an approximation configuration under one dataset but also use it for other datasets. For example, the approximation configuration identified under butterfly dataset will be used for dog dataset. 
+
+
+\subsubsection{Energy Saving}
+\begin{table}[htbp]
+  \centering
+  \caption{Average energy saving.}
+    \begin{tabular}{cccc}
+    \toprule
+    \textbf{Quality loss (\%)} & Sobel & Prewitt & Laplacian \\
+    5.0 & 74.15 & 83.63 & 80.92 \\
+    2.5 & 69.31 & 83.28 & 79.59 \\
+    0.0 & 57.44 & 80.52 & 74.86 \\
+    \bottomrule
+    \end{tabular}%
+  \label{tab:c3_woaxc_avgesaving}%
+\end{table}%
+We first present the results of pruning for the applications in \cref{tab:c3_woaxc_prune}, where we can see that the search space is compressed by 3900X to $10^{13}X$. Then, using \WoAxC, we identify the approximation configuration for each application and compute the energy saving results under different quality loss, as shown in \cref{fig:c3_woaxc_tradeoff} and \cref{tab:c3_woaxc_avgesaving}.
+
+Even under most stringent 0\% quality loss constraint, \WoAxC ~is able to save significant energy. \WoAxC ~can enable 57.44\%, 80.52\%, and 74.86\% energy saving on average across three datasets on Sobel filter, Prewitt filter, and Laplacian filter respectively. Under 5\% quality constraint, \WoAxC ~can enable 74.15\%, 83.63\%, and 80.92\% energy saving on Sobel filter, Prewitt filter, and Laplacian filter respectively. For a specific application, e.g., Sobel filter, \WoAxC ~saves energy consumption at 42.57\% (butterfly), 78.35\% (cat), and 51.41\% (dog). This also applies to other applications and datasets. %This indicates the ability of \WoAxC ~in saving energy even under the most stringent condition. 
+
+Further, different applications have different amenability to approximation and this amenability can change with different quality constraints. For example, under absolute zero quality loss, Prewitt filter shows the highest approximation level with an average energy saving of 83.63\% and Sobel filter is worst at 57.44\%.
+Different datasets of the same application also result in different approximation configurations and energy saving. For example, for Sobel filter, cat dataset always results in the highest energy saving. This is because, as verified by our experiments, cat dataset is the most error tolerant. This further motivates an workload-aware approximation configuration. Actually, this phenomena also applies to the other two applications. 
+
+Generally, as the quality constraints are relaxed, the energy saving also increases. This is expected because more relaxed quality constraint means that higher approximation level can be applied. However, there are also exceptions depends on the datasets and applications. For example, in Sobel filter, as the quality constraints relax, dog dataset does not have increased energy saving. All these phenomenon show that approximate computing is highly application and input dependent. 
+
+
+\subsubsection{Compare to Baseline}
+\label{sec:c3_woaxc_compare}
+\begin{table}[htbp]
+  \centering
+  \caption{Quality violation under butterfly-based approximation setting}
+    \begin{tabular}{cccccccccc}
+    \toprule
+     & \multicolumn{3}{c}{Sobel}  & \multicolumn{3}{c}{Prewitt}  & \multicolumn{3}{c}{Laplacian}\\   
+    Threshold & butterfly & cat & dog & butterfly & cat & dog & butterfly & cat & dog\\ 
+    \midrule
+    5.0 & \checkmark & \checkmark & $\times$ (7.5) & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark\\
+    2.5 & \checkmark & \checkmark & $\times$ (7.5) & \checkmark & \checkmark & $\times$ (5.0) & \checkmark & \checkmark & \checkmark\\
+    0.0 & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $\times$ (5.0) & \checkmark & \checkmark & \checkmark\\
+    \bottomrule
+    \end{tabular}%
+  \label{tab:c3_woaxc_train-butterfly}%
+\end{table}%
+
+\begin{table}[htbp]
+  \centering
+  \caption{Quality violation under cat-based approximation setting}
+    \begin{tabular}{cccccccccc}
+    \toprule
+     & \multicolumn{3}{c}{Sobel}  & \multicolumn{3}{c}{Prewitt} &  \multicolumn{3}{c}{Laplacian}\\
+    
+    Threshold & butterfly & cat & dog & butterfly & cat & dog & butterfly & cat & dog\\ 
+    \midrule
+    5.0 & $\times$ (40.0) & \checkmark & $\times$ (20.0) & $\times$ (47.5) & \checkmark & $\times$ (17.5) & $\times$ (12.5) & \checkmark & $\times$ (17.5)\\
+    2.5 & $\times$ (32.5) & \checkmark & $\times$ (20.0) & $\times$ (55.0) & \checkmark & $\times$ (20.0) & $\times$ (12.5) & \checkmark & $\times$ (17.5)\\
+    0.0 & $\times$ (20.0) & \checkmark & $\times$ (20.0) & $\times$ (52.5) & \checkmark & $\times$ (22.5) & $\times$ (12.5) & \checkmark & $\times$ (5.0)\\
+    \bottomrule
+    \end{tabular}%
+  \label{tab:c3_woaxc_train-cat}%
+\end{table}%
+
+\begin{table}[htbp]
+
+  \centering
+  \caption{Quality violation under dog-based approximation setting}
+    \begin{tabular}{@{}cccccccccc@{}}
+    \toprule
+     & \multicolumn{3}{c}{Sobel} & \multicolumn{3}{c}{Prewitt} & \multicolumn{3}{c}{Laplacian}\\
+    \cmidrule{2-4} \cmidrule{5-7} \cmidrule{8-10}
+    
+    \textbf{Quality constraint (\%)} & butterfly & cat & dog & butterfly & cat & dog & butterfly & cat & dog\\ 
+    \midrule
+    5.0 & \checkmark & \checkmark & \checkmark & $\times$ (17.5) & \checkmark & \checkmark & $\times$ (12.5) & \checkmark & \checkmark\\
+    2.5 & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $\times$ (12.5) & \checkmark & \checkmark\\
+    0.0 & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $\times$ (10.0) & \checkmark & \checkmark\\
+    \bottomrule
+    \end{tabular}%
+  \label{tab:c3_woaxc_train-dog}%
+\end{table}%
+
+We compare \WoAxC ~with the baseline method by performing the following steps: we use \WoAxC ~to identify the approximation configuration under one dataset (e.g., butterfly), and then use this setting for another dataset (e.g., dogs), and then examine the output quality. The results are shown in \cref{tab:c3_woaxc_train-butterfly} and \cref{tab:c3_woaxc_train-dog}, which clearly shows that the baseline cannot guarantee the output quality.
+
+\cref{tab:c3_woaxc_train-butterfly} presents the case that the approximation configuration is identified based on butterfly dataset and then used on cats and dogs datasets. We observe that the approximation configuration can lead to four violations of dog datasets. Moreover, \cref{tab:c3_woaxc_train-cat} presents the case that the approximation configuration is identified based on cat dataset and is then used on butterfly and dog datasets. We can observe that not a single quality constraint being satisfied for butterfly and dog datasets. 
+The similar situations can be observed in \cref{tab:c3_woaxc_train-dog} where the approximation configuration identified under dog dataset leads to multiple violations of other datasets. In summary, a proper approximation configuration must be highly workload-dependent, otherwise, the output quality cannot be guaranteed. 
+
+\subsubsection{Discussion}
+The main contribution of this work is the formulation of a constrained optimization problem that considers input workload and approximation configuration at the program level, and solve it using a two-phase approach. While the selection and tuning of heuristic algorithm is important to achieve good solution, it is not the main focus of this work. We leave this direction open to follow up research, e.g., applying more advanced heuristic algorithms. Actually, without loss of generality, we changed the GA parameters from two-point operations (crossover and mutation) to three-point and four-point operations, and observe that \WoAxC's performance is similar. Our future work aims to extend \WoAxC ~for approximate high-level synthesis by integrating \WoAxC ~with more hardware-level constraints such as latency and area.
+
+\section{Chapter Summary}
+
+In this chapter, we explore two topics of exposing uncertainty modeling to higher levels in a machine learning system to better understand and characterize robustness and its relationship with efficiency and performance. As to fault injection, We develop \PyTEI, a user-friendly, efficient and flexible cross-layer error injection framework for deep recommender systems. We identify that the MLP components inside DRS models are particularly sensitive to hardware errors, while other major factors such as the input sparsity can also affect DRS robustness. We also evaluate three error mitigation methods including ABFT, activation clipping and SBP. Activation clipping, based on our observation, is the most promising error mitigation method which can regain up to 30\% of the model performance with minimal overhead. As \PyTEI ~unlocks fast and efficient fault injection, machine learning system designers can potentially unlock abundant opportunities to design latency-optimized industrial recommendation systems for real-time personalized service by leveraging the trade-off between performance and robustness. For LLMs, we designed a tailored error injection tool \llmei.
+
+We also discuss another important topic of optimizing the approximate computing configurations with the consideration workload impact in this chapter. Specifically, we propose \WoAxC, a workload-aware approach that can identify a proper approximation configuration to minimize energy consumption while meeting quality constraints. \WoAxC ~is based on genetic algorithm to search the proper approximation configuration for a given program, input workload, and quality constraint. \WoAxC ~has two key phases: pruning phase to reduce the search space, and searching phase to search the solution. Experimental results on three applications and three datasets show that \WoAxC ~can enable on average, 79.6\%, 77.4\%, and 70.94\% for quality loss of 5\%, 2.5\% and 0\%, respectively. Comparisons with workload-unaware approaches highlight the importance of considering input workload in configuring approximate computing particularly when the uncertainty from approximate computing is exposed to the application level.  
+
+\end{document}
+
